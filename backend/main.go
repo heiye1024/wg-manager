@@ -90,6 +90,33 @@ func parseWireGuardOutput(output string) map[string]interface{} {
 	return result
 }
 
+// parsePeerInfo 解析单个 Peer 信息
+func parsePeerInfo(lines []string, startIdx int) map[string]string {
+	peerInfo := make(map[string]string)
+	peerInfo["public_key"] = strings.TrimPrefix(lines[startIdx], "peer: ")
+
+	for j := startIdx + 1; j < len(lines); j++ {
+		line := strings.TrimSpace(lines[j])
+		if strings.HasPrefix(line, "peer:") || line == "" {
+			break
+		}
+
+		switch {
+		case strings.HasPrefix(line, "endpoint:"):
+			peerInfo["endpoint"] = strings.TrimPrefix(line, "endpoint: ")
+		case strings.HasPrefix(line, "allowed ips:"):
+			peerInfo["allowed_ips"] = strings.TrimPrefix(line, "allowed ips: ")
+		case strings.HasPrefix(line, "latest handshake:"):
+			peerInfo["latest_handshake"] = strings.TrimPrefix(line, "latest handshake: ")
+		case strings.HasPrefix(line, "transfer:"):
+			peerInfo["transfer"] = strings.TrimPrefix(line, "transfer: ")
+		case strings.HasPrefix(line, "persistent keepalive:"):
+			peerInfo["persistent_keepalive"] = strings.TrimPrefix(line, "persistent keepalive: ")
+		}
+	}
+	return peerInfo
+}
+
 // 添加 WireGuard 配置
 func addWireGuard(c *gin.Context) {
 	var wgConfig WireGuardConfig
@@ -134,7 +161,7 @@ func getAllWireGuard(c *gin.Context) {
 	parsedOutput := parseWireGuardOutput(string(output))
 
 	// 返回接口信息
-	c.JSON(200, gin.H{"result": parsedOutput})
+	c.JSON(200, gin.H{"data": parsedOutput})
 }
 
 func getWireGuard(c *gin.Context) {
@@ -153,10 +180,10 @@ func getWireGuard(c *gin.Context) {
 		return
 	}
 
-	parsedOutput := parseWireGuardOutput(string(output))
+	result := parseWireGuardOutput(string(output))
 
 	// 返回接口信息
-	c.JSON(200, gin.H{"result": parsedOutput})
+	c.JSON(200, gin.H{"data": result})
 }
 
 // 更新 WireGuard 配置
