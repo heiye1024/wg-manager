@@ -2,8 +2,19 @@ import type React from "react"
 import "@/app/globals.css"
 import { Inter } from "next/font/google"
 import { ThemeProvider } from "@/components/theme-provider"
+import { Toaster } from "@/components/toaster"
+import type { Metadata } from "next"
 
 const inter = Inter({ subsets: ["latin"] })
+
+export const metadata: Metadata = {
+  title: {
+    default: "设备管理系统",
+    template: "%s | 设备管理系统",
+  },
+  description: "企业级网络设备管理平台",
+  keywords: ["设备管理", "网络管理", "WireGuard", "域名管理"],
+}
 
 export default function RootLayout({
   children,
@@ -15,16 +26,9 @@ export default function RootLayout({
       <body className={inter.className}>
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
           {children}
+          <Toaster />
         </ThemeProvider>
       </body>
     </html>
   )
 }
-
-
-
-import './globals.css'
-
-export const metadata = {
-      generator: 'v0.dev'
-    };

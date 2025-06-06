@@ -11,6 +11,7 @@ import { DashboardShell } from "@/components/dashboard-shell"
 import { DomainManagement } from "@/components/domain-management"
 import { NetworkTools } from "@/components/network-tools"
 import { PortScanner } from "@/components/port-scanner"
+import { WireguardConfig } from "@/components/wireguard-config"
 
 export const metadata: Metadata = {
   title: "设备管理系统",
@@ -102,80 +103,7 @@ export default function DashboardPage() {
             <DomainManagement />
           </TabsContent>
           <TabsContent value="wireguard" className="space-y-4">
-            <Card>
-              <CardHeader>
-                <CardTitle>WireGuard 配置</CardTitle>
-                <CardDescription>管理 WireGuard VPN 配置和连接</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-2">
-                  <h3 className="text-lg font-medium">服务器状态</h3>
-                  <div className="flex items-center space-x-2">
-                    <div className="h-3 w-3 rounded-full bg-green-500"></div>
-                    <span>运行中</span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <p className="text-sm font-medium text-muted-foreground">公网 IP</p>
-                      <p>203.0.113.1</p>
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium text-muted-foreground">监听端口</p>
-                      <p>51820/UDP</p>
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium text-muted-foreground">接口</p>
-                      <p>wg0</p>
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium text-muted-foreground">已连接客户端</p>
-                      <p>8/12</p>
-                    </div>
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-lg font-medium">对等设备</h3>
-                    <Button size="sm">添加设备</Button>
-                  </div>
-                  <div className="rounded-md border">
-                    <div className="grid grid-cols-4 gap-4 p-4 font-medium">
-                      <div>名称</div>
-                      <div>公钥</div>
-                      <div>分配 IP</div>
-                      <div>状态</div>
-                    </div>
-                    <div className="grid grid-cols-4 gap-4 border-t p-4">
-                      <div>办公室笔记本</div>
-                      <div className="truncate text-sm text-muted-foreground">HhKJ3...Uj4=</div>
-                      <div>10.0.0.2/32</div>
-                      <div className="flex items-center space-x-2">
-                        <div className="h-2 w-2 rounded-full bg-green-500"></div>
-                        <span>在线</span>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-4 gap-4 border-t p-4">
-                      <div>移动设备</div>
-                      <div className="truncate text-sm text-muted-foreground">Kd8Lp...9j2=</div>
-                      <div>10.0.0.3/32</div>
-                      <div className="flex items-center space-x-2">
-                        <div className="h-2 w-2 rounded-full bg-green-500"></div>
-                        <span>在线</span>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-4 gap-4 border-t p-4">
-                      <div>服务器 A</div>
-                      <div className="truncate text-sm text-muted-foreground">Jd92K...0kL=</div>
-                      <div>10.0.0.4/32</div>
-                      <div className="flex items-center space-x-2">
-                        <div className="h-2 w-2 rounded-full bg-red-500"></div>
-                        <span>离线</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+            <WireguardConfig />
             <div className="mt-4">
               <NetworkTools />
             </div>
