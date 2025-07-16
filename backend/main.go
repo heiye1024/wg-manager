@@ -19,24 +19,27 @@ type WireGuardConfig struct {
 	PeerAllowedIPs string `json:"peer_allowed_ips"`
 }
 
+type ConfigResult struct {
+	Interface map[string]string   `json:"interface"`
+	Peers     []map[string]string `json:"peers"`
+}
+
 // 解析 WireGuard 输出
+// 解析 wg show 输出
 func parseWireGuardOutput(output string) map[string]interface{} {
-	// 存储接口的相关数据
 	result := make(map[string]interface{})
 	interfaces := strings.Split(output, "\n\n") // 按接口分割
 
-	// 解析每个接口的相关信息
 	for _, iface := range interfaces {
 		if iface == "" {
 			continue
 		}
 
-		// 分割每个接口的行
 		lines := strings.Split(iface, "\n")
-		interfaceInfo := make(map[string]interface{}) // 使用 interface{} 来支持不同类型
-		var peers []map[string]string                 // 用来存储对等端信息
+		interfaceInfo := make(map[string]interface{})
+		var peers []map[string]string
 
-		// 解析接口的字段
+		var currentPeer map[string]string
 		for i := 0; i < len(lines); i++ {
 			line := strings.TrimSpace(lines[i])
 
@@ -48,38 +51,34 @@ func parseWireGuardOutput(output string) map[string]interface{} {
 				interfaceInfo["Listening Port"] = strings.TrimPrefix(line, "listening port: ")
 			} else if strings.HasPrefix(line, "peer:") {
 				// 解析 Peer
-				peerInfo := make(map[string]string)
-				peerInfo["Peer Public Key"] = strings.TrimPrefix(line, "peer: ")
-
-				// 继续读取接下来的对等端信息
-				for j := i + 1; j < len(lines); j++ {
-					peerLine := strings.TrimSpace(lines[j])
-
-					// 找到下一个 peer，退出当前 peer 的解析
-					if strings.HasPrefix(peerLine, "peer:") {
-						break
-					}
-
-					if strings.HasPrefix(peerLine, "endpoint:") {
-						peerInfo["Peer Endpoint"] = strings.TrimPrefix(peerLine, "endpoint: ")
-					} else if strings.HasPrefix(peerLine, "allowed ips:") {
-						peerInfo["Allowed IPs"] = strings.TrimPrefix(peerLine, "allowed ips: ")
-					} else if strings.HasPrefix(peerLine, "latest handshake:") {
-						peerInfo["Latest Handshake"] = strings.TrimPrefix(peerLine, "latest handshake: ")
-					} else if strings.HasPrefix(peerLine, "transfer:") {
-						peerInfo["Transfer"] = strings.TrimPrefix(peerLine, "transfer: ")
-					} else if strings.HasPrefix(peerLine, "persistent keepalive:") {
-						peerInfo["Persistent Keepalive"] = strings.TrimPrefix(peerLine, "persistent keepalive: ")
-					}
+				if currentPeer != nil {
+					peers = append(peers, currentPeer)
 				}
-				peers = append(peers, peerInfo)
+				currentPeer = make(map[string]string)
+				currentPeer["Public Key"] = strings.TrimPrefix(line, "peer: ")
+			} else if currentPeer != nil {
+				// 解析 Peer 其他字段
+				if strings.HasPrefix(line, "endpoint:") {
+					currentPeer["Endpoint"] = strings.TrimPrefix(line, "endpoint: ")
+				} else if strings.HasPrefix(line, "allowed ips:") {
+					currentPeer["Allowed IPs"] = strings.TrimPrefix(line, "allowed ips: ")
+				} else if strings.HasPrefix(line, "latest handshake:") {
+					currentPeer["Latest Handshake"] = strings.TrimPrefix(line, "latest handshake: ")
+				} else if strings.HasPrefix(line, "transfer:") {
+					currentPeer["Transfer"] = strings.TrimPrefix(line, "transfer: ")
+				} else if strings.HasPrefix(line, "persistent keepalive:") {
+					currentPeer["Persistent Keepalive"] = strings.TrimPrefix(line, "persistent keepalive: ")
+				}
 			}
 		}
 
-		// 将接口信息和 Peer 信息一起加入到 result 中
-		interfaceInfo["Peers"] = peers
+		// 添加最后一个 Peer
+		if currentPeer != nil {
+			peers = append(peers, currentPeer)
+		}
 
-		// 检查接口名称是否存在，如果没有则跳过
+		// 将接口和 Peers 添加到结果中
+		interfaceInfo["Peers"] = peers
 		if ifaceName, ok := interfaceInfo["Interface"].(string); ok {
 			result[ifaceName] = interfaceInfo
 		} else {
@@ -173,10 +172,10 @@ func getWireGuard(c *gin.Context) {
 
 	// 获取 WireGuard 接口信息
 	cmd := exec.Command("wg", "show", interfaceName)
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Println("Error retrieving WireGuard interface:", err)
-		c.JSON(500, gin.H{"error": "Failed to retrieve WireGuard interface"})
+		log.Printf("Error retrieving WireGuard interface: %v\nOutput: %s", err, string(output))
+		c.JSON(500, gin.H{"error": "Failed to retrieve WireGuard interface", "detail": string(output)})
 		return
 	}
 
