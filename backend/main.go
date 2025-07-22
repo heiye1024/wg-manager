@@ -10,10 +10,10 @@ import (
 )
 
 type PeerConfig struct {
-	PublicKey      string `json:"peer_public_key"`
-	Endpoint       string `json:"peer_endpoint"`
-	AllowedIPs     string `json:"peer_allowed_ips"`
-	PersistentKeep string `json:"peer_persistent_keepalive,omitempty"` // 可选
+	PublicKey      string `json:"public_key"`
+	Endpoint       string `json:"endpoint"`
+	AllowedIPs     string `json:"allowed_ips"`
+	PersistentKeep string `json:"persistent_keep,omitempty"`
 }
 
 // WireGuard 配置结构体
@@ -347,23 +347,77 @@ func deleteWireGuard(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "WireGuard interface deleted successfully"})
 }
 
+// addPeer 添加一个 WireGuard 对等端
+// @Summary      添加 WireGuard Peer
+// @Description  根据接口名称向指定 WireGuard 接口添加一个 Peer
+// @Tags         wireguard
+// @Accept       json
+// @Produce      json
+// @Param        interface_name  path      string      true  "WireGuard 接口名称，如 wg0"
+// @Param        peerConfig      body      PeerConfig  true  "Peer 配置"
+// @Success      200             {object}  map[string]string{"status":"Peer added successfully"}
+// @Failure      400             {object}  map[string]string{"error":"Invalid peer configuration"}
+// @Failure      500             {object}  map[string]string{"error":"Failed to add WireGuard peer"}
+// @Router       /add-peer/{interface_name} [post]
+func addPeer(c *gin.Context) {
+	var peerConfig PeerConfig
+	if err := c.ShouldBindJSON(&peerConfig); err != nil {
+		c.JSON(400, gin.H{"error": "Invalid peer configuration"})
+		return
+	}
+
+	interfaceName := c.Param("interface_name")
+	if interfaceName == "" {
+		c.JSON(400, gin.H{"error": "Interface name is required"})
+		return
+	}
+
+	// 添加 Peer
+	cmd := exec.Command("wg", "set", interfaceName,
+		"peer", peerConfig.PublicKey,
+		"endpoint", peerConfig.Endpoint,
+		"allowed-ips", peerConfig.AllowedIPs,
+	)
+	if peerConfig.PersistentKeep != "" {
+		cmd.Args = append(cmd.Args, "persistent-keepalive", peerConfig.PersistentKeep)
+	}
+
+	err := cmd.Run()
+	if err != nil {
+		log.Printf("Running command: wg set %s peer %s endpoint %s allowed-ips %s", interfaceName, peerConfig.PublicKey, peerConfig.Endpoint, peerConfig.AllowedIPs)
+		c.JSON(500, gin.H{"error": "Failed to add WireGuard peer"})
+		return
+	}
+
+	c.JSON(200, gin.H{"status": "Peer added successfully"})
+}
+
+// todo
+func deletePeer(c *gin.Context) {
+	PeerName := c.Param("interface_name")
+	if PeerName == "" {
+		c.JSON(400, gin.H{"error": "Peer name is required"})
+		return
+	}
+}
 func main() {
 	r := gin.Default()
-
 	// 添加 WireGuard 配置的 APIbrew
-	r.POST("/add-wireguard", addWireGuard)
+	r.POST("/wireguards", addWireGuard)
 
 	// 获取 WireGuard 配置的 API
-	r.GET("/get-wireguard", getAllWireGuard)
+	r.GET("/wireguards", getAllWireGuard)
 
 	// 获取指定 WireGuard 接口的配置信息的 API
-	r.GET("/get-wireguard/:interface_name", getWireGuard)
-
+	r.GET("/wireguards/:interface_name", getWireGuard)
 	// 更新 WireGuard 配置的 API
-	r.PUT("/update-wireguard", updateWireGuard)
-
+	r.PUT("/wireguards/:interface_name", updateWireGuard)
 	// 删除 WireGuard 配置的 API
-	r.DELETE("/delete-wireguard/:interface_name", deleteWireGuard)
+	r.DELETE("/wireguards/:interface_name", deleteWireGuard)
+
+	r.POST("/wireguards/:interface_name/peers", addPeer)
+	//r.GET    ("/wireguards/:interface_name/peers",   listPeers)
+	//r.DELETE ("/wireguards/:interface_name/peers/:key", deletePeer)
 
 	r.Run(":8080")
 }
