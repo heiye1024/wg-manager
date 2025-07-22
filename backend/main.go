@@ -394,11 +394,21 @@ func addPeer(c *gin.Context) {
 
 // todo
 func deletePeer(c *gin.Context) {
-	PeerName := c.Param("interface_name")
-	if PeerName == "" {
-		c.JSON(400, gin.H{"error": "Peer name is required"})
+	interfaceName := c.Param("interface_name")
+	publicKey := c.Param("key")
+	if interfaceName == "" || publicKey == "" {
+		c.JSON(400, gin.H{"error": "Interface name and Peer public key are required"})
 		return
 	}
+	// 构建 wg set 命令删除 Peer
+	cmd := exec.Command("wg", "set", interfaceName, "peer", publicKey, "remove")
+	err := cmd.Run()
+	if err != nil {
+		log.Printf("Error deleting WireGuard peer: %v", err)
+		c.JSON(500, gin.H{"error": "Failed to delete WireGuard peer"})
+		return
+	}
+	c.JSON(200, gin.H{"status": "Peer deleted successfully"})
 }
 func main() {
 	r := gin.Default()
@@ -417,7 +427,7 @@ func main() {
 
 	r.POST("/wireguards/:interface_name/peers", addPeer)
 	//r.GET    ("/wireguards/:interface_name/peers",   listPeers)
-	//r.DELETE ("/wireguards/:interface_name/peers/:key", deletePeer)
+	r.DELETE("/wireguards/:interface_name/peers/:key", deletePeer)
 
 	r.Run(":8080")
 }
