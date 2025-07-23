@@ -410,6 +410,30 @@ func deletePeer(c *gin.Context) {
 	}
 	c.JSON(200, gin.H{"status": "Peer deleted successfully"})
 }
+
+func listPeers(c *gin.Context) {
+	interfaceName := c.Param("interface_name")
+	if interfaceName == "" {
+		c.JSON(400, gin.H{"error": "Interface name is required"})
+		return
+	}
+
+	// 执行 wg show 命令获取 Peer 列表
+	cmd := exec.Command("wg", "show", interfaceName, "dump")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("Error retrieving WireGuard peers: %v\nOutput: %s", err, output)
+		c.JSON(500, gin.H{"error": "Failed to retrieve WireGuard peers"})
+		return
+	}
+
+	// 解析输出
+	peers := parseWireGuardDump(string(output))
+
+	c.JSON(200, gin.H{"data": peers})
+
+}
+
 func main() {
 	r := gin.Default()
 	// 添加 WireGuard 配置的 APIbrew
