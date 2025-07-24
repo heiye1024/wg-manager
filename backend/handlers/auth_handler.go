@@ -31,7 +31,6 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, models.APIResponse{
 			Success: false,
 			Error:   err.Error(),
-			Status:  http.StatusUnauthorized,
 		})
 		return
 	}
@@ -40,7 +39,6 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		Success: true,
 		Message: "Login successful",
 		Data:    response,
-		Status:  http.StatusOK,
 	})
 }
 
