@@ -45,8 +45,8 @@ func (s *WireGuardService) GenerateKeyPair() (privateKey, publicKey string, err 
 func (s *WireGuardService) GetInterfaces() ([]models.WireGuardInterface, error) {
 	query := `
 		SELECT id, name, private_key, public_key, listen_port, address, 
-		       COALESCE(dns, '') as dns, COALESCE(mtu, 1420) as mtu, 
-		       COALESCE(status, 'stopped') as status, created_at, updated_at
+			   COALESCE(dns, '') as dns, COALESCE(mtu, 1420) as mtu, 
+			   COALESCE(status, 'stopped') as status, created_at, updated_at
 		FROM wireguard_interfaces
 		ORDER BY created_at DESC
 	`
@@ -78,8 +78,8 @@ func (s *WireGuardService) GetInterfaces() ([]models.WireGuardInterface, error) 
 func (s *WireGuardService) GetInterface(id int) (*models.WireGuardInterface, error) {
 	query := `
 		SELECT id, name, private_key, public_key, listen_port, address,
-		       COALESCE(dns, '') as dns, COALESCE(mtu, 1420) as mtu,
-		       COALESCE(status, 'stopped') as status, created_at, updated_at
+			   COALESCE(dns, '') as dns, COALESCE(mtu, 1420) as mtu,
+			   COALESCE(status, 'stopped') as status, created_at, updated_at
 		FROM wireguard_interfaces
 		WHERE id = ?
 	`
@@ -220,10 +220,10 @@ func (s *WireGuardService) StopInterface(id int) error {
 func (s *WireGuardService) GetPeers() ([]models.WireGuardPeer, error) {
 	query := `
 		SELECT id, interface_id, name, public_key, private_key, allowed_ips, 
-		       COALESCE(endpoint, '') as endpoint,
-		       COALESCE(persistent_keepalive, 0) as persistent_keepalive,
-		       COALESCE(status, 'disconnected') as status,
-		       last_handshake, bytes_received, bytes_sent, created_at, updated_at
+			   COALESCE(endpoint, '') as endpoint,
+			   COALESCE(persistent_keepalive, 0) as persistent_keepalive,
+			   COALESCE(status, 'disconnected') as status,
+			   last_handshake, bytes_received, bytes_sent, created_at, updated_at
 		FROM wireguard_peers
 		ORDER BY created_at DESC
 	`
@@ -255,10 +255,10 @@ func (s *WireGuardService) GetPeers() ([]models.WireGuardPeer, error) {
 func (s *WireGuardService) GetPeersByInterface(interfaceID int) ([]models.WireGuardPeer, error) {
 	query := `
 		SELECT id, interface_id, name, public_key, private_key, allowed_ips,
-		       COALESCE(endpoint, '') as endpoint,
-		       COALESCE(persistent_keepalive, 0) as persistent_keepalive,
-		       COALESCE(status, 'disconnected') as status,
-		       last_handshake, bytes_received, bytes_sent, created_at, updated_at
+			   COALESCE(endpoint, '') as endpoint,
+			   COALESCE(persistent_keepalive, 0) as persistent_keepalive,
+			   COALESCE(status, 'disconnected') as status,
+			   last_handshake, bytes_received, bytes_sent, created_at, updated_at
 		FROM wireguard_peers
 		WHERE interface_id = ?
 		ORDER BY created_at DESC
@@ -291,10 +291,10 @@ func (s *WireGuardService) GetPeersByInterface(interfaceID int) ([]models.WireGu
 func (s *WireGuardService) GetPeer(id int) (*models.WireGuardPeer, error) {
 	query := `
 		SELECT id, interface_id, name, public_key, private_key, allowed_ips,
-		       COALESCE(endpoint, '') as endpoint,
-		       COALESCE(persistent_keepalive, 0) as persistent_keepalive,
-		       COALESCE(status, 'disconnected') as status,
-		       last_handshake, bytes_received, bytes_sent, created_at, updated_at
+			   COALESCE(endpoint, '') as endpoint,
+			   COALESCE(persistent_keepalive, 0) as persistent_keepalive,
+			   COALESCE(status, 'disconnected') as status,
+			   last_handshake, bytes_received, bytes_sent, created_at, updated_at
 		FROM wireguard_peers
 		WHERE id = ?
 	`
@@ -390,45 +390,56 @@ func (s *WireGuardService) GetInterfaceConfig(id int) (string, error) {
 		return "", err
 	}
 
-	peers, err := s.GetPeersByInterface(id)
-	if err != nil {
-		return "", err
-	}
+   peer, err := s.GetPeer(id)
+   if err != nil {
+	   return "", err
+   }
 
-	config := fmt.Sprintf(`[Interface]
-PrivateKey = %s
-Address = %s
-ListenPort = %d
-`, iface.PrivateKey, iface.Address, iface.ListenPort)
+   // 自动生成 private_key 并保存
+   if peer.PrivateKey == "" {
+	   priv, pub, err := s.GenerateKeyPair()
+	   if err != nil {
+		   return "", fmt.Errorf("failed to generate private key: %v", err)
+	   }
+	   // 更新数据库
+	   _, err = s.db.Exec("UPDATE wireguard_peers SET private_key = ?, public_key = ? WHERE id = ?", priv, pub, peer.ID)
+	   if err != nil {
+		   return "", fmt.Errorf("failed to update peer private_key: %v", err)
+	   }
+	   peer.PrivateKey = priv
+	   peer.PublicKey = pub
+   }
 
-	if iface.DNS != "" {
-		config += fmt.Sprintf("DNS = %s\n", iface.DNS)
-	}
+   if peer.AllowedIPs == "" {
+	   return "", fmt.Errorf("AllowedIPs is required for peer config")
+   }
 
-	if iface.MTU > 0 && iface.MTU != 1420 {
-		config += fmt.Sprintf("MTU = %d\n", iface.MTU)
-	}
+   iface, err := s.GetInterface(peer.InterfaceID)
+   if err != nil {
+	   return "", err
+   }
 
-	config += "\n"
-
-	for _, peer := range peers {
-		config += fmt.Sprintf(`[Peer]
-PublicKey = %s
-AllowedIPs = %s
-`, peer.PublicKey, peer.AllowedIPs)
-
-		if peer.Endpoint != "" {
-			config += fmt.Sprintf("Endpoint = %s\n", peer.Endpoint)
-		}
-
+   config := fmt.Sprintf(`[Interface]
 		if peer.PersistentKeepalive > 0 {
 			config += fmt.Sprintf("PersistentKeepalive = %d\n", peer.PersistentKeepalive)
 		}
+
+   if iface.DNS != "" {
+	   config += fmt.Sprintf("DNS = %s\n", iface.DNS)
+   }
+
+   config += fmt.Sprintf(`
 
 		config += "\n"
 	}
 
 	return config, nil
+
+   if peer.PersistentKeepalive > 0 {
+	   config += fmt.Sprintf("PersistentKeepalive = %d\n", peer.PersistentKeepalive)
+   }
+
+   return config, nil
 }
 
 func (s *WireGuardService) GetPeerConfig(id int) (string, error) {
