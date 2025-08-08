@@ -237,7 +237,6 @@ func createTables(db *sql.DB) error {
 	}
 
 	// 兼容老表结构，自动补充缺失字段
-	// 检查dns字段
 	if !columnExists(db, "wireguard_interfaces", "dns") {
 		if _, err := db.Exec(`ALTER TABLE wireguard_interfaces ADD COLUMN dns TEXT DEFAULT ''`); err != nil {
 			log.Printf("[createTables] add dns column failed: %v", err)
@@ -246,6 +245,16 @@ func createTables(db *sql.DB) error {
 	if !columnExists(db, "wireguard_interfaces", "mtu") {
 		if _, err := db.Exec(`ALTER TABLE wireguard_interfaces ADD COLUMN mtu INTEGER DEFAULT 1420`); err != nil {
 			log.Printf("[createTables] add mtu column failed: %v", err)
+		}
+	}
+	if !columnExists(db, "wireguard_peers", "endpoint") {
+		if _, err := db.Exec(`ALTER TABLE wireguard_peers ADD COLUMN endpoint TEXT DEFAULT ''`); err != nil {
+			log.Printf("[createTables] add endpoint column failed: %v", err)
+		}
+	}
+	if !columnExists(db, "wireguard_peers", "persistent_keepalive") {
+		if _, err := db.Exec(`ALTER TABLE wireguard_peers ADD COLUMN persistent_keepalive INTEGER DEFAULT 0`); err != nil {
+			log.Printf("[createTables] add persistent_keepalive column failed: %v", err)
 		}
 	}
 	return nil
