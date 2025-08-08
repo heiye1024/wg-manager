@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"fmt"
 	"golang.org/x/crypto/curve25519"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -199,20 +201,56 @@ func (s *WireGuardService) DeleteInterface(id int) error {
 }
 
 func (s *WireGuardService) StartInterface(id int) error {
-	query := "UPDATE wireguard_interfaces SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-	_, err := s.db.Exec(query, id)
+	// 1. 先查接口信息
+	iface, err := s.GetInterface(id)
 	if err != nil {
-		return fmt.Errorf("failed to start interface: %v", err)
+		return fmt.Errorf("failed to get interface: %v", err)
 	}
+
+	// 2. 生成配置内容（包含所有 peer）
+	cfg, err := s.GetInterfaceConfig(id)
+	if err != nil {
+		return fmt.Errorf("failed to get config: %v", err)
+	}
+
+	// 3. 写入到 /etc/wireguard/<name>.conf
+	confPath := fmt.Sprintf("/etc/wireguard/%s.conf", iface.Name)
+	if err := os.WriteFile(confPath, []byte(cfg), 0600); err != nil {
+		return fmt.Errorf("failed to write config: %v", err)
+	}
+
+	// 4. 调用 wg-quick up 启动接口
+	cmd := exec.Command("wg-quick", "up", iface.Name)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to start interface: %v, output: %s", err, out)
+	}
+
+	// 5. 更新数据库状态
+	query := "UPDATE wireguard_interfaces SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+	if _, err := s.db.Exec(query, id); err != nil {
+		return fmt.Errorf("failed to update DB: %v", err)
+	}
+
 	return nil
 }
 
 func (s *WireGuardService) StopInterface(id int) error {
-	query := "UPDATE wireguard_interfaces SET status = 'stopped', updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-	_, err := s.db.Exec(query, id)
+	iface, err := s.GetInterface(id)
 	if err != nil {
-		return fmt.Errorf("failed to stop interface: %v", err)
+		return fmt.Errorf("failed to get interface: %v", err)
 	}
+
+	// 调用 wg-quick down 停止接口
+	cmd := exec.Command("wg-quick", "down", iface.Name)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to stop interface: %v, output: %s", err, out)
+	}
+
+	query := "UPDATE wireguard_interfaces SET status = 'stopped', updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+	if _, err := s.db.Exec(query, id); err != nil {
+		return fmt.Errorf("failed to update DB: %v", err)
+	}
+
 	return nil
 }
 

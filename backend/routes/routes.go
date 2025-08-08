@@ -6,6 +6,8 @@ import (
 	"backend/services"
 	"backend/websocket"
 	"github.com/gin-gonic/gin"
+	"github.com/swaggo/files"
+	"github.com/swaggo/gin-swagger"
 )
 
 func SetupRoutes(
@@ -31,6 +33,7 @@ func SetupRoutes(
 
 	// WebSocket endpoint (requires authentication)
 	router.GET("/ws", middleware.AuthMiddleware(authService), hub.HandleWebSocket)
+	router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	// Protected routes
 	protected := api.Group("/")
