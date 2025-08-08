@@ -1,9 +1,13 @@
 package database
 
 import (
+	"bufio"
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -26,8 +30,119 @@ func Initialize(databaseURL string) (*sql.DB, error) {
 		log.Printf("Warning: Could not create default user: %v", err)
 	}
 
+	// 读取当前服务器 WireGuard 信息并保存到数据库
+	if err := syncWireGuardFromSystem(db); err != nil {
+		log.Printf("Warning: Could not sync WireGuard info from system: %v", err)
+	}
+
 	log.Println("Database initialized successfully")
 	return db, nil
+}
+
+// 读取系统 WireGuard 信息并保存到数据库
+func syncWireGuardFromSystem(db *sql.DB) error {
+	// 读取 /etc/wireguard/*.conf 文件
+	confDir := "/etc/wireguard"
+	files, err := readDir(confDir)
+	if err != nil {
+		log.Printf("[syncWireGuardFromSystem] 无法读取 %s: %v", confDir, err)
+		return nil // 不阻塞初始化
+	}
+
+	for _, file := range files {
+		if !file.IsDir() && (len(file.Name()) > 5 && file.Name()[len(file.Name())-5:] == ".conf") {
+			path := confDir + "/" + file.Name()
+			if err := importWireGuardConf(db, path); err != nil {
+				log.Printf("[syncWireGuardFromSystem] 导入 %s 失败: %v", path, err)
+			}
+		}
+	}
+	return nil
+}
+
+// 读取目录内容
+func readDir(dirname string) ([]os.DirEntry, error) {
+	return os.ReadDir(dirname)
+}
+
+// 解析单个 WireGuard 配置文件并写入数据库
+func importWireGuardConf(db *sql.DB, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	section := ""
+	iface := make(map[string]string)
+	var peers []map[string]string
+	peer := make(map[string]string)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			if section == "Peer" && len(peer) > 0 {
+				peers = append(peers, peer)
+				peer = make(map[string]string)
+			}
+			section = strings.Trim(line, "[]")
+			continue
+		}
+		kv := strings.SplitN(line, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(kv[0])
+		val := strings.TrimSpace(kv[1])
+		if section == "Interface" {
+			iface[key] = val
+		} else if section == "Peer" {
+			peer[key] = val
+		}
+	}
+	if section == "Peer" && len(peer) > 0 {
+		peers = append(peers, peer)
+	}
+
+	// 插入 interface
+	if iface["PrivateKey"] == "" || iface["Address"] == "" || iface["ListenPort"] == "" {
+		return nil // 跳过无效配置
+	}
+	name := strings.TrimSuffix(filepath.Base(path), ".conf")
+	// 检查是否已存在
+	var count int
+	_ = db.QueryRow("SELECT COUNT(*) FROM wireguard_interfaces WHERE name = ?", name).Scan(&count)
+	if count == 0 {
+		_, err = db.Exec(`INSERT INTO wireguard_interfaces (name, private_key, public_key, listen_port, address, status) VALUES (?, ?, '', ?, ?, 'inactive')`,
+			name, iface["PrivateKey"], iface["ListenPort"], iface["Address"])
+		if err != nil {
+			log.Printf("[importWireGuardConf] 插入interface失败: %v", err)
+		}
+	}
+	// 获取interface id
+	var ifaceID int
+	_ = db.QueryRow("SELECT id FROM wireguard_interfaces WHERE name = ?", name).Scan(&ifaceID)
+
+	// 插入 peers
+	for _, p := range peers {
+		if p["PublicKey"] == "" || p["AllowedIPs"] == "" {
+			continue
+		}
+		// 检查是否已存在
+		var peerCount int
+		_ = db.QueryRow("SELECT COUNT(*) FROM wireguard_peers WHERE interface_id = ? AND public_key = ?", ifaceID, p["PublicKey"]).Scan(&peerCount)
+		if peerCount == 0 {
+			_, err = db.Exec(`INSERT INTO wireguard_peers (interface_id, name, public_key, private_key, ip, allowed_ips, status) VALUES (?, ?, ?, '', '', ?, 'inactive')`,
+				ifaceID, p["PublicKey"], p["PublicKey"], p["AllowedIPs"])
+			if err != nil {
+				log.Printf("[importWireGuardConf] 插入peer失败: %v", err)
+			}
+		}
+	}
+	return nil
 }
 
 func createTables(db *sql.DB) error {
