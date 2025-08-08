@@ -174,6 +174,8 @@ func createTables(db *sql.DB) error {
 			private_key TEXT,
 			ip TEXT NOT NULL,
 			allowed_ips TEXT NOT NULL,
+			preshared_key TEXT,
+			persistent_keepalive INTEGER DEFAULT 25,
 			status TEXT DEFAULT 'inactive',
 			last_handshake DATETIME,
 			bytes_received INTEGER DEFAULT 0,

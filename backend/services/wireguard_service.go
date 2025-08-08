@@ -1,14 +1,14 @@
 package services
 
 import (
+	"backend/models"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"fmt"
-	"time"
-
-	"backend/models"
 	"golang.org/x/crypto/curve25519"
+	"strings"
+	"time"
 )
 
 type WireGuardService struct {
@@ -385,61 +385,65 @@ func (s *WireGuardService) DeletePeer(id int) error {
 
 // Configuration generation
 func (s *WireGuardService) GetInterfaceConfig(id int) (string, error) {
+	// 1) 读取接口
 	iface, err := s.GetInterface(id)
 	if err != nil {
 		return "", err
 	}
 
-   peer, err := s.GetPeer(id)
-   if err != nil {
-	   return "", err
-   }
-
-   // 自动生成 private_key 并保存
-   if peer.PrivateKey == "" {
-	   priv, pub, err := s.GenerateKeyPair()
-	   if err != nil {
-		   return "", fmt.Errorf("failed to generate private key: %v", err)
-	   }
-	   // 更新数据库
-	   _, err = s.db.Exec("UPDATE wireguard_peers SET private_key = ?, public_key = ? WHERE id = ?", priv, pub, peer.ID)
-	   if err != nil {
-		   return "", fmt.Errorf("failed to update peer private_key: %v", err)
-	   }
-	   peer.PrivateKey = priv
-	   peer.PublicKey = pub
-   }
-
-   if peer.AllowedIPs == "" {
-	   return "", fmt.Errorf("AllowedIPs is required for peer config")
-   }
-
-   iface, err := s.GetInterface(peer.InterfaceID)
-   if err != nil {
-	   return "", err
-   }
-
-   config := fmt.Sprintf(`[Interface]
-		if peer.PersistentKeepalive > 0 {
-			config += fmt.Sprintf("PersistentKeepalive = %d\n", peer.PersistentKeepalive)
-		}
-
-   if iface.DNS != "" {
-	   config += fmt.Sprintf("DNS = %s\n", iface.DNS)
-   }
-
-   config += fmt.Sprintf(`
-
-		config += "\n"
+	// 基本校验
+	if iface.PrivateKey == "" || iface.PublicKey == "" {
+		return "", fmt.Errorf("interface keypair is missing")
+	}
+	if strings.TrimSpace(iface.Address) == "" {
+		return "", fmt.Errorf("interface address is required (e.g. 10.6.0.1/24)")
+	}
+	if iface.ListenPort == 0 {
+		return "", fmt.Errorf("listen port is required")
 	}
 
-	return config, nil
+	// 2) 读取该接口下所有 peers
+	peers, err := s.GetPeersByInterface(id)
+	if err != nil {
+		return "", err
+	}
 
-   if peer.PersistentKeepalive > 0 {
-	   config += fmt.Sprintf("PersistentKeepalive = %d\n", peer.PersistentKeepalive)
-   }
+	var b strings.Builder
 
-   return config, nil
+	// 3) [Interface]（服务器侧）
+	fmt.Fprintf(&b, "[Interface]\n")
+	fmt.Fprintf(&b, "PrivateKey = %s\n", iface.PrivateKey)
+	fmt.Fprintf(&b, "Address = %s\n", iface.Address)
+	fmt.Fprintf(&b, "ListenPort = %d\n", iface.ListenPort)
+	if iface.MTU > 0 {
+		fmt.Fprintf(&b, "MTU = %d\n", iface.MTU)
+	}
+	// 一般 DNS 只下发给客户端，这里可不写；若你需要也可写：
+	if strings.TrimSpace(iface.DNS) != "" {
+		fmt.Fprintf(&b, "DNS = %s\n", iface.DNS)
+	}
+
+	// 4) [Peer] 列出所有对端（服务端视角）
+	for _, p := range peers {
+		if strings.TrimSpace(p.PublicKey) == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n[Peer]\n")
+		fmt.Fprintf(&b, "PublicKey = %s\n", p.PublicKey)
+
+		// 服务器侧 AllowedIPs：通常填该 peer 的隧道地址（最小路由）
+		allowed := strings.TrimSpace(p.IP)
+		if allowed == "" && strings.TrimSpace(p.AllowedIPs) != "" {
+			// 如果你想用自定义更大网段，就用 allowed_ips
+			allowed = p.AllowedIPs
+		}
+		if allowed != "" {
+			fmt.Fprintf(&b, "AllowedIPs = %s\n", allowed)
+		}
+		// 你的 schema 没有 peer 的 endpoint，这里就不写 Endpoint
+	}
+
+	return b.String(), nil
 }
 
 func (s *WireGuardService) GetPeerConfig(id int) (string, error) {

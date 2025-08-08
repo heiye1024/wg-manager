@@ -21,6 +21,8 @@ type WireGuardInterface struct {
 	ListenPort int       `json:"listen_port" db:"listen_port"`
 	DNS        string    `json:"dns" db:"dns"`
 	MTU        int       `json:"mtu" db:"mtu"`
+	Endpoint   string    `db:"endpoint" json:"endpoint"`
+	Mode       string    `db:"mode" json:"mode"`
 	Status     string    `json:"status" db:"status"`
 	CreatedAt  time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at" db:"updated_at"`
@@ -32,6 +34,7 @@ type WireGuardPeer struct {
 	Name                string     `json:"name" db:"name"`
 	PublicKey           string     `json:"public_key" db:"public_key"`
 	PrivateKey          string     `json:"private_key" db:"private_key"`
+	IP                  string     `db:"ip" json:"ip"`
 	AllowedIPs          string     `json:"allowed_ips" db:"allowed_ips"`
 	Endpoint            string     `json:"endpoint" db:"endpoint"`
 	PersistentKeepalive int        `json:"persistent_keepalive" db:"persistent_keepalive"`
