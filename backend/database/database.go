@@ -148,27 +148,24 @@ func importWireGuardConf(db *sql.DB, path string) error {
 func createTables(db *sql.DB) error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS users (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			username TEXT UNIQUE NOT NULL,
-			password_hash TEXT NOT NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE TABLE IF NOT EXISTS wireguard_interfaces (
 		   id INTEGER PRIMARY KEY AUTOINCREMENT,
-		   name TEXT UNIQUE NOT NULL,
-		   private_key TEXT NOT NULL,
-		   public_key TEXT NOT NULL,
-		   listen_port INTEGER NOT NULL,
-		   address TEXT NOT NULL,
-		   dns TEXT DEFAULT '',
-		   mtu INTEGER DEFAULT 1420,
-		   status TEXT DEFAULT 'inactive',
-		   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		   username TEXT UNIQUE NOT NULL,
+		   password_hash TEXT NOT NULL,
+		   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	   )`,
-		// 兼容老表结构，自动补充缺失字段
-		`ALTER TABLE wireguard_interfaces ADD COLUMN dns TEXT DEFAULT ''`,
-		`ALTER TABLE wireguard_interfaces ADD COLUMN mtu INTEGER DEFAULT 1420`,
+		`CREATE TABLE IF NOT EXISTS wireguard_interfaces (
+		  id INTEGER PRIMARY KEY AUTOINCREMENT,
+		  name TEXT UNIQUE NOT NULL,
+		  private_key TEXT NOT NULL,
+		  public_key TEXT NOT NULL,
+		  listen_port INTEGER NOT NULL,
+		  address TEXT NOT NULL,
+		  dns TEXT DEFAULT '',
+		  mtu INTEGER DEFAULT 1420,
+		  status TEXT DEFAULT 'inactive',
+		  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	  )`,
 		`CREATE TABLE IF NOT EXISTS wireguard_peers (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			interface_id INTEGER NOT NULL,
@@ -239,7 +236,40 @@ func createTables(db *sql.DB) error {
 		}
 	}
 
+	// 兼容老表结构，自动补充缺失字段
+	// 检查dns字段
+	if !columnExists(db, "wireguard_interfaces", "dns") {
+		if _, err := db.Exec(`ALTER TABLE wireguard_interfaces ADD COLUMN dns TEXT DEFAULT ''`); err != nil {
+			log.Printf("[createTables] add dns column failed: %v", err)
+		}
+	}
+	if !columnExists(db, "wireguard_interfaces", "mtu") {
+		if _, err := db.Exec(`ALTER TABLE wireguard_interfaces ADD COLUMN mtu INTEGER DEFAULT 1420`); err != nil {
+			log.Printf("[createTables] add mtu column failed: %v", err)
+		}
+	}
 	return nil
+}
+
+// 判断表字段是否存在
+func columnExists(db *sql.DB, table, column string) bool {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dfltValue interface{}
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err == nil {
+			if name == column {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func createDefaultUser(db *sql.DB) error {
