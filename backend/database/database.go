@@ -154,16 +154,21 @@ func createTables(db *sql.DB) error {
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS wireguard_interfaces (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT UNIQUE NOT NULL,
-			private_key TEXT NOT NULL,
-			public_key TEXT NOT NULL,
-			listen_port INTEGER NOT NULL,
-			address TEXT NOT NULL,
-			status TEXT DEFAULT 'inactive',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)`,
+		   id INTEGER PRIMARY KEY AUTOINCREMENT,
+		   name TEXT UNIQUE NOT NULL,
+		   private_key TEXT NOT NULL,
+		   public_key TEXT NOT NULL,
+		   listen_port INTEGER NOT NULL,
+		   address TEXT NOT NULL,
+		   dns TEXT DEFAULT '',
+		   mtu INTEGER DEFAULT 1420,
+		   status TEXT DEFAULT 'inactive',
+		   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	   )`,
+		// 兼容老表结构，自动补充缺失字段
+		`ALTER TABLE wireguard_interfaces ADD COLUMN dns TEXT DEFAULT ''`,
+		`ALTER TABLE wireguard_interfaces ADD COLUMN mtu INTEGER DEFAULT 1420`,
 		`CREATE TABLE IF NOT EXISTS wireguard_peers (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			interface_id INTEGER NOT NULL,
