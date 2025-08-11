@@ -11,7 +11,7 @@ import { DashboardShell } from "@/components/dashboard-shell"
 import { DomainManagement } from "@/components/domain-management"
 import { NetworkTools } from "@/components/network-tools"
 import { PortScanner } from "@/components/port-scanner"
-import { WireguardConfig } from "@/components/wireguard-config"
+import { WireguardConfig } from "@/components/wireguard/wireguard-config"
 
 export const metadata: Metadata = {
   title: "设备管理系统",

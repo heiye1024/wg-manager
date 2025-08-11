@@ -1,8 +1,9 @@
 import axios from "axios"
+import { get } from "http"
 
 // 创建 axios 实例
 const api = axios.create({
-  baseURL: "/api",
+  baseURL: "http://172.17.1.61:8080/api",
   timeout: 10000,
   headers: {
     "Content-Type": "application/json",
@@ -12,12 +13,11 @@ const api = axios.create({
 // 请求拦截器
 api.interceptors.request.use(
   (config) => {
-    // 可以在这里添加认证令牌等
+    config.headers.Authorization =
+      "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxLCJ1c2VybmFtZSI6ImFkbWluIiwiZXhwIjoxNzU0OTY2MTM2LCJuYmYiOjE3NTQ4Nzk3MzYsImlhdCI6MTc1NDg3OTczNn0.Q65ZefijHCB3BvVMQ3y2yjBIRPa26RSzu5osqftgSwU"
     return config
   },
-  (error) => {
-    return Promise.reject(error)
-  },
+  (error) => Promise.reject(error)
 )
 
 // 响应拦截器
@@ -41,8 +41,16 @@ api.interceptors.response.use(
   },
 )
 
+
+
+
+
 // WireGuard API
 export const wireguardApi = {
+
+  // 获取所有 WireGuard 接口
+  getInterfaces: () => api.get("/wireguard/interfaces"),
+
   // 获取所有对等设备
   getPeers: () => api.get("/wireguard/peers"),
 
@@ -59,14 +67,20 @@ export const wireguardApi = {
   deletePeer: (id: string) => api.delete(`/wireguard/peers/${id}`),
 
   // 获取服务器状态
-  getServerStatus: () => api.get("/wireguard/status"),
+  getServerStatus: (id: string) => api.get(`/wireguard/interfaces/${id}/status`),
 
   // 重启 WireGuard 服务
   restartService: () => api.post("/wireguard/restart"),
 
   // 生成客户端配置
   generateClientConfig: (id: string) => api.get(`/wireguard/peers/${id}/config`),
+
+  getSystemStatus: () => api.get("/wireguard/status"),
 }
+
+
+
+
 
 // 设备 API
 export const deviceApi = {
