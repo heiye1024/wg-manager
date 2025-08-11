@@ -2,23 +2,226 @@ package services
 
 import (
 	"backend/models"
+	"bytes"
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"golang.org/x/crypto/curve25519"
+	"golang.zx2c4.com/wireguard/wgctrl"
+	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
 
 type WireGuardService struct {
-	db *sql.DB
+	db     *sql.DB
+	client *wgctrl.Client
 }
 
 func NewWireGuardService(db *sql.DB) *WireGuardService {
-	return &WireGuardService{db: db}
+	c, _ := wgctrl.New()
+	return &WireGuardService{db: db, client: c}
+}
+
+func (s *WireGuardService) Close() error {
+	if s.client != nil {
+		return s.client.Close()
+	}
+	return nil
+}
+
+// 安全解析以逗号分隔的 IP 列表（如 "10.0.0.2/32, 10.0.0.3/32"）
+func splitCSV(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
+}
+
+// 安全地把字符串转成 int64；解析失败返回 0
+func parseInt64Safe(s string) int64 {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "-" {
+		return 0
+	}
+	v, _ := strconv.ParseInt(s, 10, 64)
+	return v
+}
+
+func (s *WireGuardService) GetInterfaceStatus(id int) (*models.InterfaceStatus, error) {
+	iface, err := s.GetInterface(id)
+	if err != nil {
+		return nil, err
+	}
+	name := iface.Name
+
+	// 网卡是否 up
+	up := false
+	index := 0
+	if ifi, _ := net.InterfaceByName(name); ifi != nil {
+		up = (ifi.Flags & net.FlagUp) != 0
+		index = ifi.Index
+	}
+
+	st := &models.InterfaceStatus{
+		ID:         id,
+		Name:       name,
+		Up:         up,
+		Index:      index,
+		ListenPort: 0,
+		Peers:      []models.PeerStatus{},
+	}
+
+	// 地址段
+	st.AddressCIDRs, _ = ipAddrsJSON(name)
+
+	// 读取 wg 状态
+	out, err := exec.Command("bash", "-lc", fmt.Sprintf("wg show %q dump 2>/dev/null", name)).Output()
+	if err != nil {
+		return st, nil // wg 未启动也返回基本信息
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) == 0 {
+		return st, nil
+	}
+
+	ifFields := strings.Split(lines[0], "\t")
+	if len(ifFields) >= 4 {
+		st.ListenPort, _ = strconv.Atoi(strings.TrimSpace(ifFields[3]))
+	}
+	for _, ln := range lines[1:] {
+		f := strings.Split(ln, "\t")
+		get := func(i int) string {
+			if i >= 0 && i < len(f) {
+				return f[i]
+			}
+			return ""
+		}
+		ps := models.PeerStatus{
+			PublicKey:       get(1),
+			Endpoint:        get(3),
+			AllowedIPs:      splitCSV(get(4)),
+			LatestHandshake: parseInt64Safe(get(5)),
+			TransferRx:      parseInt64Safe(get(6)),
+			TransferTx:      parseInt64Safe(get(7)),
+		}
+		st.Peers = append(st.Peers, ps)
+	}
+	st.PeersCount = len(st.Peers)
+	return st, nil
+}
+
+// WatchInterfaceStatus 周期查询并回调（用于 SSE/WS）
+// 回调失败不会中断；ctx 取消后退出
+func (s *WireGuardService) WatchInterfaceStatus(ctx context.Context, id int, interval time.Duration, onUpdate func(*models.InterfaceStatus)) {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	// 先立即推一次
+	if st, err := s.GetInterfaceStatus(id); err == nil && onUpdate != nil {
+		onUpdate(st)
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			st, err := s.GetInterfaceStatus(id)
+			if err != nil {
+				continue
+			}
+			if onUpdate != nil {
+				onUpdate(st)
+			}
+		}
+	}
+}
+
+// ---------- helpers ----------
+
+func splitNonEmpty(s string) []string {
+	var res []string
+	for _, ln := range strings.Split(strings.TrimSpace(s), "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln != "" {
+			res = append(res, ln)
+		}
+	}
+	return res
+}
+
+func atoiSafe(s string) int {
+	v, _ := strconv.Atoi(strings.TrimSpace(s))
+	return v
+}
+func atoi64Safe(s string) int64 {
+	v, _ := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	return v
+}
+func csvSplit(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
+}
+
+// 解析 `ip -j addr show dev <name>`
+func ipAddrsJSON(name string) ([]string, error) {
+	cmd := exec.Command("bash", "-lc", fmt.Sprintf("ip -j addr show dev %s", shellQuote(name)))
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	var arr []struct {
+		AddrInfo []struct {
+			Local     string `json:"local"`
+			PrefixLen int    `json:"prefixlen"`
+		} `json:"addr_info"`
+	}
+	if err := json.Unmarshal(out, &arr); err != nil {
+		return nil, err
+	}
+	var res []string
+	if len(arr) > 0 {
+		for _, a := range arr[0].AddrInfo {
+			if a.Local != "" && a.PrefixLen > 0 {
+				res = append(res, fmt.Sprintf("%s/%d", a.Local, a.PrefixLen))
+			}
+		}
+	}
+	return res, nil
+}
+
+func shellQuote(s string) string {
+	var b bytes.Buffer
+	b.WriteByte('\'')
+	for _, r := range s {
+		if r == '\'' {
+			b.WriteString("'\"'\"'")
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('\'')
+	return b.String()
 }
 
 // Generate WireGuard key pair
@@ -71,10 +274,25 @@ func (s *WireGuardService) GetInterfaces() ([]models.WireGuardInterface, error) 
 			return nil, fmt.Errorf("failed to scan interface: %v", err)
 		}
 
+		// Update status from actual WireGuard interface
+		actualStatus := s.getInterfaceActualStatus(iface.Name)
+		if actualStatus != iface.Status {
+			s.updateInterfaceStatus(iface.ID, actualStatus)
+			iface.Status = actualStatus
+		}
+
 		interfaces = append(interfaces, iface)
 	}
 
 	return interfaces, nil
+}
+
+func (s *WireGuardService) updateInterfaceStatus(id int, status string) error {
+	_, err := s.db.Exec(
+		`UPDATE wireguard_interfaces SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		status, id,
+	)
+	return err
 }
 
 func (s *WireGuardService) GetInterface(id int) (*models.WireGuardInterface, error) {
@@ -484,6 +702,17 @@ func (s *WireGuardService) GetInterfaceConfig(id int) (string, error) {
 	return b.String(), nil
 }
 
+func (s *WireGuardService) getInterfaceActualStatus(name string) string {
+	// A. 尝试 wgctrl：能拿到设备说明接口已创建（通常也在 up 状态）
+	if s.client != nil {
+		if _, err := s.client.Device(name); err == nil {
+			return "running"
+		}
+		// 继续降级，用于进一步判断
+	}
+	return "running"
+}
+
 func (s *WireGuardService) GetPeerConfig(id int) (string, error) {
 	peer, err := s.GetPeer(id)
 	if err != nil {
@@ -544,5 +773,49 @@ func (s *WireGuardService) UpdatePeerStatus() error {
 		}
 	}
 
+	return nil
+}
+
+// RestartService 尝试整体重启 wg-quick 服务；失败则逐接口 down/up 兜底
+func (s *WireGuardService) RestartService() error {
+	// 方案 A：systemd 一键重启（存在则成功最省事）
+	if out, err := exec.Command("bash", "-lc",
+		`systemctl daemon-reload >/dev/null 2>&1 || true; `+
+			`systemctl restart 'wg-quick@*.service' 2>&1 || systemctl restart wg-quick@wg0.service 2>&1`).CombinedOutput(); err == nil {
+		return nil
+	} else {
+		// 不中断，继续兜底
+		_ = out
+	}
+
+	// 方案 B 兜底：对数据库里记录的接口逐一 down/up
+	ifaces, err := s.GetInterfaces()
+	if err != nil {
+		return fmt.Errorf("restart fallback: list interfaces: %w", err)
+	}
+
+	var errs []string
+	for _, iface := range ifaces {
+		// 如果你只想重启“已运行”的，可以判断 iface.Status == "running"
+		// 先尝试 down（即使没启动也无所谓）
+		if out, err := exec.Command("bash", "-lc", fmt.Sprintf("wg-quick down %q", iface.Name)).CombinedOutput(); err != nil {
+			// 不是致命错误，记录后继续
+			errs = append(errs, fmt.Sprintf("down %s: %v (%s)", iface.Name, err, strings.TrimSpace(string(out))))
+		}
+		// 再 up
+		if out, err := exec.Command("bash", "-lc", fmt.Sprintf("wg-quick up %q", iface.Name)).CombinedOutput(); err != nil {
+			errs = append(errs, fmt.Sprintf("up %s: %v (%s)", iface.Name, err, strings.TrimSpace(string(out))))
+			continue
+		}
+
+		// 可选：更新 DB 状态为 running
+		if _, err := s.db.Exec(`UPDATE wireguard_interfaces SET status='running', updated_at=CURRENT_TIMESTAMP WHERE id=?`, iface.ID); err != nil {
+			errs = append(errs, fmt.Sprintf("db update %s: %v", iface.Name, err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("restart fallback finished with errors: %s", strings.Join(errs, "; "))
+	}
 	return nil
 }

@@ -159,3 +159,23 @@ type WSPeerUpdate struct {
 	BytesSent     int64  `json:"bytes_sent"`
 	Timestamp     string `json:"timestamp"`
 }
+
+type PeerStatus struct {
+	PublicKey       string   `json:"publicKey"`
+	Endpoint        string   `json:"endpoint"`
+	LatestHandshake int64    `json:"latestHandshake"`
+	TransferRx      int64    `json:"transferRx"`
+	TransferTx      int64    `json:"transferTx"`
+	AllowedIPs      []string `json:"allowedIPs"`
+}
+
+type InterfaceStatus struct {
+	ID           int          `json:"id"`
+	Name         string       `json:"name"`
+	Up           bool         `json:"up"`
+	Index        int          `json:"index"`
+	ListenPort   int          `json:"listenPort"`
+	PeersCount   int          `json:"peersCount"`
+	Peers        []PeerStatus `json:"peers"`
+	AddressCIDRs []string     `json:"addressCIDRs"`
+}

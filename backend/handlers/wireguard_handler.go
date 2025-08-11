@@ -17,7 +17,7 @@ func NewWireGuardHandler(service *services.WireGuardService) *WireGuardHandler {
 	return &WireGuardHandler{service: service}
 }
 
-// Interface handlers
+// Interface handlersf
 func (h *WireGuardHandler) GetInterfaces(c *gin.Context) {
 	interfaces, err := h.service.GetInterfaces()
 	if err != nil {
@@ -195,6 +195,28 @@ func (h *WireGuardHandler) StopInterface(c *gin.Context) {
 		Success: true,
 		Message: "Interface stopped successfully",
 	})
+}
+
+func (h *WireGuardHandler) GetInterfaceStatus(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.APIResponse{Success: false, Error: "Invalid interface ID"})
+		return
+	}
+	status, err := h.service.GetInterfaceStatus(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.APIResponse{Success: false, Error: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, models.APIResponse{Success: true, Data: status})
+}
+
+func (h *WireGuardHandler) RestartService(c *gin.Context) {
+	if err := h.service.RestartService(); err != nil {
+		c.JSON(http.StatusInternalServerError, models.APIResponse{Success: false, Error: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, models.APIResponse{Success: true, Message: "WireGuard service restarted"})
 }
 
 func (h *WireGuardHandler) GetInterfaceConfig(c *gin.Context) {

@@ -61,6 +61,7 @@ func SetupRoutes(
 				interfaces.POST("/:id/start", wgHandler.StartInterface)
 				interfaces.POST("/:id/stop", wgHandler.StopInterface)
 				interfaces.GET("/:id/config", wgHandler.GetInterfaceConfig)
+				interfaces.GET("/:id/status", wgHandler.GetInterfaceStatus)
 			}
 
 			// Peer routes
