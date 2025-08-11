@@ -6,11 +6,9 @@ import (
 	"backend/routes"
 	"backend/services"
 	"backend/websocket"
-	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"log"
 	"os"
-	"time"
 )
 
 func main() {
@@ -26,15 +24,6 @@ func main() {
 
 	// 创建路由器
 	router := gin.Default()
-	// ① 全局 CORS（一定要在注册路由前 Use）
-	router.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"*"}, // 允许所有域名访问
-		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Requested-With"},
-		ExposeHeaders:    []string{"Content-Length"},
-		AllowCredentials: true, // 如不带 cookie 可设为 false
-		MaxAge:           12 * time.Hour,
-	}))
 
 	// Initialize services
 	authService := services.NewAuthService(db, cfg.JWTSecret)
