@@ -667,23 +667,33 @@ func (s *WireGuardService) GetInterfaceStatus(id int) (*models.InterfaceStatus, 
 	if err != nil {
 		return nil, err
 	}
-	up, index := false, 0
-	if ifi, _ := net.InterfaceByName(iface.Name); ifi != nil {
+
+	var (
+		ifi        *net.Interface
+		up         bool
+		index      int
+		foundIface bool
+	)
+	ifi, _ = net.InterfaceByName(iface.Name)
+	if ifi != nil {
 		up = (ifi.Flags & net.FlagUp) != 0
 		index = ifi.Index
+		foundIface = true
 	}
 
 	st := &models.InterfaceStatus{
-		ID:         id,
-		Name:       iface.Name,
-		Up:         up,
-		Index:      index,
-		ListenPort: 0,
-		Peers:      []models.PeerStatus{},
+		ID:           id,
+		Name:         iface.Name,
+		Up:           up,
+		Index:        index,
+		ListenPort:   0,
+		Peers:        []models.PeerStatus{},
+		AddressCIDRs: []string{},
+		Status:       "unknown", // 默认 unknown
 	}
 
 	// 地址
-	if ifi, _ := net.InterfaceByName(iface.Name); ifi != nil {
+	if ifi != nil {
 		if addrs, _ := ifi.Addrs(); len(addrs) > 0 {
 			for _, a := range addrs {
 				st.AddressCIDRs = append(st.AddressCIDRs, a.String())
@@ -691,22 +701,31 @@ func (s *WireGuardService) GetInterfaceStatus(id int) (*models.InterfaceStatus, 
 		}
 	}
 
-	// 设备/Peers
+	// wgctrl 设备信息
 	c := s.client
 	if c == nil {
 		var err error
 		c, err = wgctrl.New()
 		if err != nil {
-			// 返回链路层信息即可
+			// 拿不到 wgctrl，就保持默认的 "unknown"
 			return st, nil
 		}
 		defer c.Close()
 	}
+
 	dev, err := c.Device(iface.Name)
 	if err != nil {
-		return st, nil // 未创建/未启动
+		// 没有对应的 wireguard 设备：如果网卡名存在，则认为服务未启动
+		if foundIface {
+			st.Status = "stopped"
+		}
+		return st, nil
 	}
+
+	// 有设备即视为运行中（ListenPort 可能为 0，但设备存在更有说服力）
 	st.ListenPort = dev.ListenPort
+	st.Status = "running"
+
 	for _, p := range dev.Peers {
 		ps := models.PeerStatus{
 			PublicKey: p.PublicKey.String(),
@@ -716,7 +735,7 @@ func (s *WireGuardService) GetInterfaceStatus(id int) (*models.InterfaceStatus, 
 				}
 				return ""
 			}(),
-			LatestHandshake: p.LastHandshakeTime.Unix(),
+			LatestHandshake: p.LastHandshakeTime.Unix(), // 秒级
 			TransferRx:      int64(p.ReceiveBytes),
 			TransferTx:      int64(p.TransmitBytes),
 			AllowedIPs:      make([]string, 0, len(p.AllowedIPs)),
@@ -727,6 +746,7 @@ func (s *WireGuardService) GetInterfaceStatus(id int) (*models.InterfaceStatus, 
 		st.Peers = append(st.Peers, ps)
 	}
 	st.PeersCount = len(st.Peers)
+
 	return st, nil
 }
 

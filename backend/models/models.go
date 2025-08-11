@@ -177,5 +177,6 @@ type InterfaceStatus struct {
 	ListenPort   int          `json:"listenPort"`
 	PeersCount   int          `json:"peersCount"`
 	Peers        []PeerStatus `json:"peers"`
+	Status       string       `json:"status"`
 	AddressCIDRs []string     `json:"addressCIDRs"`
 }
