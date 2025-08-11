@@ -5,11 +5,9 @@ import (
 	"backend/middleware"
 	"backend/services"
 	"backend/websocket"
-	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/swaggo/files"
 	"github.com/swaggo/gin-swagger"
-	"time"
 )
 
 func SetupRoutes(
@@ -19,19 +17,6 @@ func SetupRoutes(
 	hub *websocket.Hub,
 ) {
 
-	r := gin.Default()
-
-	// CORS middleware
-	r.Use(cors.New(cors.Config{
-		AllowOriginFunc: func(origin string) bool {
-			return true // 允许所有来源
-		},
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
-		ExposeHeaders:    []string{"Content-Length"},
-		AllowCredentials: true,
-		MaxAge:           12 * time.Hour,
-	}))
 	// Handlers
 	authHandler := handlers.NewAuthHandler(authService)
 	wgHandler := handlers.NewWireGuardHandler(wgService)
