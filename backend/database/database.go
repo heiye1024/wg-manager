@@ -158,7 +158,7 @@ func createTables(db *sql.DB) error {
 		  name TEXT UNIQUE NOT NULL,
 		  private_key TEXT NOT NULL,
 		  public_key TEXT NOT NULL,
-		  listen_port INTEGER NOT NULL,
+		  listen_port INTEGER NOT NULL UNIQUE,
 		  address TEXT NOT NULL,
 		  dns TEXT DEFAULT '',
 		  mtu INTEGER DEFAULT 1420,
