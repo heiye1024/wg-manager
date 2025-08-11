@@ -2,19 +2,14 @@ package services
 
 import (
 	"backend/models"
-	"bytes"
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/base64"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"golang.org/x/crypto/curve25519"
 	"golang.zx2c4.com/wireguard/wgctrl"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 	"net"
-	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -25,7 +20,7 @@ type WireGuardService struct {
 }
 
 func NewWireGuardService(db *sql.DB) *WireGuardService {
-	c, _ := wgctrl.New()
+	c, _ := wgctrl.New() // 失败时为 nil，调用处会兜底
 	return &WireGuardService{db: db, client: c}
 }
 
@@ -36,7 +31,91 @@ func (s *WireGuardService) Close() error {
 	return nil
 }
 
-// 安全解析以逗号分隔的 IP 列表（如 "10.0.0.2/32, 10.0.0.3/32"）
+/* -------------------- 工具与公共方法 -------------------- */
+
+// 生成 WireGuard 密钥对（wgtypes 保证规范）
+func (s *WireGuardService) GenerateKeyPair() (privateKey, publicKey string, err error) {
+	priv, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		return "", "", fmt.Errorf("generate private key: %w", err)
+	}
+	pub := priv.PublicKey()
+	return priv.String(), pub.String(), nil
+}
+
+func parseWGPrivateKey(b64 string) (*wgtypes.Key, error) {
+	k, err := wgtypes.ParseKey(strings.TrimSpace(b64))
+	if err != nil {
+		return nil, fmt.Errorf("invalid private key: %w", err)
+	}
+	return &k, nil
+}
+func parseWGPublicKey(b64 string) (*wgtypes.Key, error) {
+	k, err := wgtypes.ParseKey(strings.TrimSpace(b64))
+	if err != nil {
+		return nil, fmt.Errorf("invalid public key: %w", err)
+	}
+	return &k, nil
+}
+
+func runShell(cmd string) ([]byte, error) {
+	return exec.Command("bash", "-lc", cmd).CombinedOutput()
+}
+
+func ipEnsureLink(name string) error {
+	// 已存在则忽略错误
+	if out, err := runShell(fmt.Sprintf(`ip link show %q`, name)); err == nil && len(out) > 0 {
+		return nil
+	}
+	// 创建 wireguard 链路
+	if out, err := runShell(fmt.Sprintf(`ip link add dev %q type wireguard`, name)); err != nil {
+		return fmt.Errorf("ip link add %s: %v (%s)", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func ipSetMTU(name string, mtu int) error {
+	if mtu <= 0 {
+		return nil
+	}
+	if out, err := runShell(fmt.Sprintf(`ip link set dev %q mtu %d`, name, mtu)); err != nil {
+		return fmt.Errorf("ip set mtu: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func ipAddrReplace(name, cidr string) error {
+	cidr = strings.TrimSpace(cidr)
+	if cidr == "" {
+		return nil
+	}
+	if out, err := runShell(fmt.Sprintf(`ip address replace %s dev %q`, cidr, name)); err != nil {
+		return fmt.Errorf("ip addr replace: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func ipLinkUp(name string) error {
+	if out, err := runShell(fmt.Sprintf(`ip link set up dev %q`, name)); err != nil {
+		return fmt.Errorf("ip link up: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func ipLinkDown(name string) error {
+	if out, err := runShell(fmt.Sprintf(`ip link set down dev %q`, name)); err != nil {
+		return fmt.Errorf("ip link down: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func ipLinkDel(name string) error {
+	if out, err := runShell(fmt.Sprintf(`ip link del dev %q`, name)); err != nil {
+		return fmt.Errorf("ip link del: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func splitCSV(s string) []string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -49,204 +128,43 @@ func splitCSV(s string) []string {
 	return parts
 }
 
-// 安全地把字符串转成 int64；解析失败返回 0
-func parseInt64Safe(s string) int64 {
-	s = strings.TrimSpace(s)
-	if s == "" || s == "-" {
-		return 0
-	}
-	v, _ := strconv.ParseInt(s, 10, 64)
-	return v
-}
-
-func (s *WireGuardService) GetInterfaceStatus(id int) (*models.InterfaceStatus, error) {
-	iface, err := s.GetInterface(id)
-	if err != nil {
-		return nil, err
-	}
-	name := iface.Name
-
-	// 网卡是否 up
-	up := false
-	index := 0
-	if ifi, _ := net.InterfaceByName(name); ifi != nil {
-		up = (ifi.Flags & net.FlagUp) != 0
-		index = ifi.Index
-	}
-
-	st := &models.InterfaceStatus{
-		ID:         id,
-		Name:       name,
-		Up:         up,
-		Index:      index,
-		ListenPort: 0,
-		Peers:      []models.PeerStatus{},
-	}
-
-	// 地址段
-	st.AddressCIDRs, _ = ipAddrsJSON(name)
-
-	// 读取 wg 状态
-	out, err := exec.Command("bash", "-lc", fmt.Sprintf("wg show %q dump 2>/dev/null", name)).Output()
-	if err != nil {
-		return st, nil // wg 未启动也返回基本信息
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) == 0 {
-		return st, nil
-	}
-
-	ifFields := strings.Split(lines[0], "\t")
-	if len(ifFields) >= 4 {
-		st.ListenPort, _ = strconv.Atoi(strings.TrimSpace(ifFields[3]))
-	}
-	for _, ln := range lines[1:] {
-		f := strings.Split(ln, "\t")
-		get := func(i int) string {
-			if i >= 0 && i < len(f) {
-				return f[i]
-			}
-			return ""
+func parseAllowedIPs(s string) ([]net.IPNet, error) {
+	ips := splitCSV(s)
+	var res []net.IPNet
+	for _, x := range ips {
+		_, ipn, err := net.ParseCIDR(x)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CIDR %q: %w", x, err)
 		}
-		ps := models.PeerStatus{
-			PublicKey:       get(1),
-			Endpoint:        get(3),
-			AllowedIPs:      splitCSV(get(4)),
-			LatestHandshake: parseInt64Safe(get(5)),
-			TransferRx:      parseInt64Safe(get(6)),
-			TransferTx:      parseInt64Safe(get(7)),
-		}
-		st.Peers = append(st.Peers, ps)
-	}
-	st.PeersCount = len(st.Peers)
-	return st, nil
-}
-
-// WatchInterfaceStatus 周期查询并回调（用于 SSE/WS）
-// 回调失败不会中断；ctx 取消后退出
-func (s *WireGuardService) WatchInterfaceStatus(ctx context.Context, id int, interval time.Duration, onUpdate func(*models.InterfaceStatus)) {
-	if interval <= 0 {
-		interval = time.Second
-	}
-	// 先立即推一次
-	if st, err := s.GetInterfaceStatus(id); err == nil && onUpdate != nil {
-		onUpdate(st)
-	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			st, err := s.GetInterfaceStatus(id)
-			if err != nil {
-				continue
-			}
-			if onUpdate != nil {
-				onUpdate(st)
-			}
-		}
-	}
-}
-
-// ---------- helpers ----------
-
-func splitNonEmpty(s string) []string {
-	var res []string
-	for _, ln := range strings.Split(strings.TrimSpace(s), "\n") {
-		ln = strings.TrimSpace(ln)
-		if ln != "" {
-			res = append(res, ln)
-		}
-	}
-	return res
-}
-
-func atoiSafe(s string) int {
-	v, _ := strconv.Atoi(strings.TrimSpace(s))
-	return v
-}
-func atoi64Safe(s string) int64 {
-	v, _ := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
-	return v
-}
-func csvSplit(s string) []string {
-	if strings.TrimSpace(s) == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	for i := range parts {
-		parts[i] = strings.TrimSpace(parts[i])
-	}
-	return parts
-}
-
-// 解析 `ip -j addr show dev <name>`
-func ipAddrsJSON(name string) ([]string, error) {
-	cmd := exec.Command("bash", "-lc", fmt.Sprintf("ip -j addr show dev %s", shellQuote(name)))
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, err
-	}
-	var arr []struct {
-		AddrInfo []struct {
-			Local     string `json:"local"`
-			PrefixLen int    `json:"prefixlen"`
-		} `json:"addr_info"`
-	}
-	if err := json.Unmarshal(out, &arr); err != nil {
-		return nil, err
-	}
-	var res []string
-	if len(arr) > 0 {
-		for _, a := range arr[0].AddrInfo {
-			if a.Local != "" && a.PrefixLen > 0 {
-				res = append(res, fmt.Sprintf("%s/%d", a.Local, a.PrefixLen))
-			}
-		}
+		res = append(res, *ipn)
 	}
 	return res, nil
 }
 
-func shellQuote(s string) string {
-	var b bytes.Buffer
-	b.WriteByte('\'')
-	for _, r := range s {
-		if r == '\'' {
-			b.WriteString("'\"'\"'")
-		} else {
-			b.WriteRune(r)
-		}
+func parseEndpoint(ep string) (*net.UDPAddr, error) {
+	ep = strings.TrimSpace(ep)
+	if ep == "" {
+		return nil, nil
 	}
-	b.WriteByte('\'')
-	return b.String()
-}
-
-// Generate WireGuard key pair
-func (s *WireGuardService) GenerateKeyPair() (privateKey, publicKey string, err error) {
-	var private [32]byte
-	_, err = rand.Read(private[:])
+	ua, err := net.ResolveUDPAddr("udp", ep)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to generate private key: %v", err)
+		return nil, fmt.Errorf("parse endpoint %q: %w", ep, err)
 	}
-
-	// Clamp the private key
-	private[0] &= 248
-	private[31] &= 127
-	private[31] |= 64
-
-	var public [32]byte
-	curve25519.ScalarBaseMult(&public, &private)
-
-	privateKey = base64.StdEncoding.EncodeToString(private[:])
-	publicKey = base64.StdEncoding.EncodeToString(public[:])
-
-	return privateKey, publicKey, nil
+	return ua, nil
 }
 
-// Interface management
+func boolPtr(b bool) *bool { return &b }
+func intPtr(i int) *int    { return &i }
+func durationPtrSeconds(sec int) *time.Duration {
+	if sec <= 0 {
+		return nil
+	}
+	d := time.Duration(sec) * time.Second
+	return &d
+}
+
+/* -------------------- 接口（DB） -------------------- */
+
 func (s *WireGuardService) GetInterfaces() ([]models.WireGuardInterface, error) {
 	query := `
 		SELECT id, name, private_key, public_key, listen_port, address, 
@@ -255,44 +173,25 @@ func (s *WireGuardService) GetInterfaces() ([]models.WireGuardInterface, error) 
 		FROM wireguard_interfaces
 		ORDER BY created_at DESC
 	`
-
 	rows, err := s.db.Query(query)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query interfaces: %v", err)
+		return nil, fmt.Errorf("query interfaces: %w", err)
 	}
 	defer rows.Close()
 
-	var interfaces []models.WireGuardInterface
+	var list []models.WireGuardInterface
 	for rows.Next() {
-		var iface models.WireGuardInterface
-		err := rows.Scan(
-			&iface.ID, &iface.Name, &iface.PrivateKey, &iface.PublicKey,
-			&iface.ListenPort, &iface.Address, &iface.DNS, &iface.MTU,
-			&iface.Status, &iface.CreatedAt, &iface.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan interface: %v", err)
+		var it models.WireGuardInterface
+		if err := rows.Scan(
+			&it.ID, &it.Name, &it.PrivateKey, &it.PublicKey,
+			&it.ListenPort, &it.Address, &it.DNS, &it.MTU,
+			&it.Status, &it.CreatedAt, &it.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan interface: %w", err)
 		}
-
-		// Update status from actual WireGuard interface
-		actualStatus := s.getInterfaceActualStatus(iface.Name)
-		if actualStatus != iface.Status {
-			s.updateInterfaceStatus(iface.ID, actualStatus)
-			iface.Status = actualStatus
-		}
-
-		interfaces = append(interfaces, iface)
+		list = append(list, it)
 	}
-
-	return interfaces, nil
-}
-
-func (s *WireGuardService) updateInterfaceStatus(id int, status string) error {
-	_, err := s.db.Exec(
-		`UPDATE wireguard_interfaces SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		status, id,
-	)
-	return err
+	return list, nil
 }
 
 func (s *WireGuardService) GetInterface(id int) (*models.WireGuardInterface, error) {
@@ -303,54 +202,45 @@ func (s *WireGuardService) GetInterface(id int) (*models.WireGuardInterface, err
 		FROM wireguard_interfaces
 		WHERE id = ?
 	`
-
-	var iface models.WireGuardInterface
+	var it models.WireGuardInterface
 	err := s.db.QueryRow(query, id).Scan(
-		&iface.ID, &iface.Name, &iface.PrivateKey, &iface.PublicKey,
-		&iface.ListenPort, &iface.Address, &iface.DNS, &iface.MTU,
-		&iface.Status, &iface.CreatedAt, &iface.UpdatedAt,
+		&it.ID, &it.Name, &it.PrivateKey, &it.PublicKey,
+		&it.ListenPort, &it.Address, &it.DNS, &it.MTU,
+		&it.Status, &it.CreatedAt, &it.UpdatedAt,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("interface not found")
 		}
-		return nil, fmt.Errorf("failed to get interface: %v", err)
+		return nil, fmt.Errorf("get interface: %w", err)
 	}
-
-	return &iface, nil
+	return &it, nil
 }
 
 func (s *WireGuardService) CreateInterface(req models.CreateInterfaceRequest) (*models.WireGuardInterface, error) {
-	var privateKey, publicKey string
+	privateKey := strings.TrimSpace(req.PrivateKey)
+	var publicKey string
 	var err error
 
-	if req.PrivateKey != "" {
-		privateKey = req.PrivateKey
-		// Generate public key from private key
-		privateBytes, err := base64.StdEncoding.DecodeString(privateKey)
-		if err != nil {
-			return nil, fmt.Errorf("invalid private key: %v", err)
-		}
-		if len(privateBytes) != 32 {
-			return nil, fmt.Errorf("invalid private key length")
-		}
-
-		var private, public [32]byte
-		copy(private[:], privateBytes)
-		curve25519.ScalarBaseMult(&public, &private)
-		publicKey = base64.StdEncoding.EncodeToString(public[:])
-	} else {
+	if privateKey == "" {
+		// 未提供私钥：直接生成一对
 		privateKey, publicKey, err = s.GenerateKeyPair()
 		if err != nil {
-			return nil, fmt.Errorf("failed to generate key pair: %v", err)
+			return nil, err
 		}
+	} else {
+		// 已提供私钥：由私钥派生公钥
+		k, err := wgtypes.ParseKey(privateKey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid private key: %w", err)
+		}
+		publicKey = k.PublicKey().String()
 	}
 
 	dns := req.DNS
 	if dns == "" {
 		dns = "8.8.8.8"
 	}
-
 	mtu := req.MTU
 	if mtu == 0 {
 		mtu = 1420
@@ -360,17 +250,11 @@ func (s *WireGuardService) CreateInterface(req models.CreateInterfaceRequest) (*
 		INSERT INTO wireguard_interfaces (name, private_key, public_key, listen_port, address, dns, mtu, status)
 		VALUES (?, ?, ?, ?, ?, ?, ?, 'stopped')
 	`
-
-	result, err := s.db.Exec(query, req.Name, privateKey, publicKey, req.ListenPort, req.Address, dns, mtu)
+	res, err := s.db.Exec(query, req.Name, privateKey, publicKey, req.ListenPort, req.Address, dns, mtu)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create interface: %v", err)
+		return nil, fmt.Errorf("create interface: %w", err)
 	}
-
-	id, err := result.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get interface ID: %v", err)
-	}
-
+	id, _ := res.LastInsertId()
 	return s.GetInterface(int(id))
 }
 
@@ -379,338 +263,232 @@ func (s *WireGuardService) UpdateInterface(id int, req models.UpdateInterfaceReq
 	if dns == "" {
 		dns = "8.8.8.8"
 	}
-
 	mtu := req.MTU
 	if mtu == 0 {
 		mtu = 1420
 	}
-
 	query := `
-		UPDATE wireguard_interfaces 
-		SET name = ?, listen_port = ?, address = ?, dns = ?, mtu = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
+		UPDATE wireguard_interfaces
+		SET name=?, listen_port=?, address=?, dns=?, mtu=?, updated_at=CURRENT_TIMESTAMP
+		WHERE id=?
 	`
-
-	_, err := s.db.Exec(query, req.Name, req.ListenPort, req.Address, dns, mtu, id)
-	if err != nil {
-		return nil, fmt.Errorf("failed to update interface: %v", err)
+	if _, err := s.db.Exec(query, req.Name, req.ListenPort, req.Address, dns, mtu, id); err != nil {
+		return nil, fmt.Errorf("update interface: %w", err)
 	}
-
+	// 若接口在运行，可选择立即热更新（这里不自动，交由 Start/Restart/Apply）
 	return s.GetInterface(id)
 }
 
 func (s *WireGuardService) DeleteInterface(id int) error {
-	query := "DELETE FROM wireguard_interfaces WHERE id = ?"
-	result, err := s.db.Exec(query, id)
+	it, err := s.GetInterface(id)
 	if err != nil {
-		return fmt.Errorf("failed to delete interface: %v", err)
+		return err
 	}
-
-	rowsAffected, err := result.RowsAffected()
+	// 尝试先停掉
+	_ = s.StopInterface(id)
+	// 删除 DB
+	_, err = s.db.Exec(`DELETE FROM wireguard_interfaces WHERE id=?`, id)
 	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %v", err)
+		return fmt.Errorf("delete interface: %w", err)
 	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("interface not found")
-	}
-
+	// 删除链路（如果还在）
+	_ = ipLinkDel(it.Name)
 	return nil
 }
 
-func (s *WireGuardService) StartInterface(id int) error {
-	// 1. 先查接口信息
-	iface, err := s.GetInterface(id)
-	if err != nil {
-		return fmt.Errorf("failed to get interface: %v", err)
-	}
+/* -------------------- Peer（DB） -------------------- */
 
-	// 2. 生成配置内容（包含所有 peer）
-	cfg, err := s.GetInterfaceConfig(id)
-	if err != nil {
-		return fmt.Errorf("failed to get config: %v", err)
-	}
-
-	// 3. 写入到 /etc/wireguard/<name>.conf
-	confPath := fmt.Sprintf("/etc/wireguard/%s.conf", iface.Name)
-	if err := os.WriteFile(confPath, []byte(cfg), 0600); err != nil {
-		return fmt.Errorf("failed to write config: %v", err)
-	}
-
-	// 4. 调用 wg-quick up 启动接口
-	cmd := exec.Command("wg-quick", "up", iface.Name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to start interface: %v, output: %s", err, out)
-	}
-
-	// 5. 更新数据库状态
-	query := "UPDATE wireguard_interfaces SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-	if _, err := s.db.Exec(query, id); err != nil {
-		return fmt.Errorf("failed to update DB: %v", err)
-	}
-
-	return nil
-}
-
-func (s *WireGuardService) StopInterface(id int) error {
-	iface, err := s.GetInterface(id)
-	if err != nil {
-		return fmt.Errorf("failed to get interface: %v", err)
-	}
-
-	// 调用 wg-quick down 停止接口
-	cmd := exec.Command("wg-quick", "down", iface.Name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to stop interface: %v, output: %s", err, out)
-	}
-
-	query := "UPDATE wireguard_interfaces SET status = 'stopped', updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-	if _, err := s.db.Exec(query, id); err != nil {
-		return fmt.Errorf("failed to update DB: %v", err)
-	}
-
-	return nil
-}
-
-// Peer management
 func (s *WireGuardService) GetPeers() ([]models.WireGuardPeer, error) {
-	query := `
-		SELECT id, interface_id, name, public_key, private_key, allowed_ips, 
-			   COALESCE(endpoint, '') as endpoint,
-			   COALESCE(persistent_keepalive, 0) as persistent_keepalive,
-			   COALESCE(status, 'disconnected') as status,
+	rows, err := s.db.Query(`
+		SELECT id, interface_id, name, public_key, private_key, allowed_ips,
+			   COALESCE(endpoint, '') AS endpoint,
+			   COALESCE(persistent_keepalive, 0) AS persistent_keepalive,
+			   COALESCE(status, 'disconnected') AS status,
 			   last_handshake, bytes_received, bytes_sent, created_at, updated_at
 		FROM wireguard_peers
-		ORDER BY created_at DESC
-	`
-
-	rows, err := s.db.Query(query)
+		ORDER BY created_at DESC`)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query peers: %v", err)
+		return nil, fmt.Errorf("query peers: %w", err)
 	}
 	defer rows.Close()
 
-	var peers []models.WireGuardPeer
+	var list []models.WireGuardPeer
 	for rows.Next() {
-		var peer models.WireGuardPeer
-		err := rows.Scan(
-			&peer.ID, &peer.InterfaceID, &peer.Name, &peer.PublicKey, &peer.PrivateKey,
-			&peer.AllowedIPs, &peer.Endpoint, &peer.PersistentKeepalive, &peer.Status,
-			&peer.LastHandshake, &peer.BytesReceived, &peer.BytesSent,
-			&peer.CreatedAt, &peer.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan peer: %v", err)
+		var p models.WireGuardPeer
+		if err := rows.Scan(
+			&p.ID, &p.InterfaceID, &p.Name, &p.PublicKey, &p.PrivateKey,
+			&p.AllowedIPs, &p.Endpoint, &p.PersistentKeepalive, &p.Status,
+			&p.LastHandshake, &p.BytesReceived, &p.BytesSent,
+			&p.CreatedAt, &p.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan peer: %w", err)
 		}
-		peers = append(peers, peer)
+		list = append(list, p)
 	}
-
-	return peers, nil
+	return list, nil
 }
 
 func (s *WireGuardService) GetPeersByInterface(interfaceID int) ([]models.WireGuardPeer, error) {
-	query := `
+	rows, err := s.db.Query(`
 		SELECT id, interface_id, name, public_key, private_key, allowed_ips,
-			   COALESCE(endpoint, '') as endpoint,
-			   COALESCE(persistent_keepalive, 0) as persistent_keepalive,
-			   COALESCE(status, 'disconnected') as status,
+			   COALESCE(endpoint, '') AS endpoint,
+			   COALESCE(persistent_keepalive, 0) AS persistent_keepalive,
+			   COALESCE(status, 'disconnected') AS status,
 			   last_handshake, bytes_received, bytes_sent, created_at, updated_at
 		FROM wireguard_peers
 		WHERE interface_id = ?
-		ORDER BY created_at DESC
-	`
-
-	rows, err := s.db.Query(query, interfaceID)
+		ORDER BY created_at DESC`, interfaceID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query peers: %v", err)
+		return nil, fmt.Errorf("query peers by interface: %w", err)
 	}
 	defer rows.Close()
 
-	var peers []models.WireGuardPeer
+	var list []models.WireGuardPeer
 	for rows.Next() {
-		var peer models.WireGuardPeer
-		err := rows.Scan(
-			&peer.ID, &peer.InterfaceID, &peer.Name, &peer.PublicKey, &peer.PrivateKey,
-			&peer.AllowedIPs, &peer.Endpoint, &peer.PersistentKeepalive, &peer.Status,
-			&peer.LastHandshake, &peer.BytesReceived, &peer.BytesSent,
-			&peer.CreatedAt, &peer.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan peer: %v", err)
+		var p models.WireGuardPeer
+		if err := rows.Scan(
+			&p.ID, &p.InterfaceID, &p.Name, &p.PublicKey, &p.PrivateKey,
+			&p.AllowedIPs, &p.Endpoint, &p.PersistentKeepalive, &p.Status,
+			&p.LastHandshake, &p.BytesReceived, &p.BytesSent,
+			&p.CreatedAt, &p.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan peer: %w", err)
 		}
-		peers = append(peers, peer)
+		list = append(list, p)
 	}
-
-	return peers, nil
+	return list, nil
 }
 
 func (s *WireGuardService) GetPeer(id int) (*models.WireGuardPeer, error) {
-	query := `
+	var p models.WireGuardPeer
+	err := s.db.QueryRow(`
 		SELECT id, interface_id, name, public_key, private_key, allowed_ips,
-			   COALESCE(endpoint, '') as endpoint,
-			   COALESCE(persistent_keepalive, 0) as persistent_keepalive,
-			   COALESCE(status, 'disconnected') as status,
+			   COALESCE(endpoint, '') AS endpoint,
+			   COALESCE(persistent_keepalive, 0) AS persistent_keepalive,
+			   COALESCE(status, 'disconnected') AS status,
 			   last_handshake, bytes_received, bytes_sent, created_at, updated_at
 		FROM wireguard_peers
-		WHERE id = ?
-	`
-
-	var peer models.WireGuardPeer
-	err := s.db.QueryRow(query, id).Scan(
-		&peer.ID, &peer.InterfaceID, &peer.Name, &peer.PublicKey, &peer.PrivateKey,
-		&peer.AllowedIPs, &peer.Endpoint, &peer.PersistentKeepalive, &peer.Status,
-		&peer.LastHandshake, &peer.BytesReceived, &peer.BytesSent,
-		&peer.CreatedAt, &peer.UpdatedAt,
+		WHERE id = ?`, id).Scan(
+		&p.ID, &p.InterfaceID, &p.Name, &p.PublicKey, &p.PrivateKey,
+		&p.AllowedIPs, &p.Endpoint, &p.PersistentKeepalive, &p.Status,
+		&p.LastHandshake, &p.BytesReceived, &p.BytesSent,
+		&p.CreatedAt, &p.UpdatedAt,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("peer not found")
 		}
-		return nil, fmt.Errorf("failed to get peer: %v", err)
+		return nil, fmt.Errorf("get peer: %w", err)
 	}
-
-	return &peer, nil
+	return &p, nil
 }
 
 func (s *WireGuardService) CreatePeer(req models.CreatePeerRequest) (*models.WireGuardPeer, error) {
-	var privateKey, publicKey string
-	var err error
+	pub := strings.TrimSpace(req.PublicKey)
+	priv := "" // CreatePeerRequest 没有 PrivateKey 字段
 
-	if req.PublicKey != "" {
-		publicKey = req.PublicKey
-		// For client peers, we might not have the private key
-		privateKey = ""
-	} else {
-		privateKey, publicKey, err = s.GenerateKeyPair()
+	var err error
+	if pub == "" {
+		// 没有提供公钥：内部生成一对（便于之后导出客户端配置）
+		priv, pub, err = s.GenerateKeyPair()
 		if err != nil {
-			return nil, fmt.Errorf("failed to generate key pair: %v", err)
+			return nil, err
 		}
 	}
 
-	query := `
+	res, err := s.db.Exec(`
 		INSERT INTO wireguard_peers (interface_id, name, public_key, private_key, allowed_ips, endpoint, persistent_keepalive, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'disconnected')
-	`
-
-	result, err := s.db.Exec(query, req.InterfaceID, req.Name, publicKey, privateKey, req.AllowedIPs, req.Endpoint, req.PersistentKeepalive)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'disconnected')`,
+		req.InterfaceID, req.Name, pub, priv, req.AllowedIPs, req.Endpoint, req.PersistentKeepalive)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create peer: %v", err)
+		return nil, fmt.Errorf("create peer: %w", err)
 	}
+	id, _ := res.LastInsertId()
 
-	id, err := result.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get peer ID: %v", err)
-	}
+	// 可选：立即把该接口的最新配置下发到内核（热更新）
+	_ = s.ApplyInterfaceConfig(req.InterfaceID)
 
 	return s.GetPeer(int(id))
 }
 
 func (s *WireGuardService) UpdatePeer(id int, req models.UpdatePeerRequest) (*models.WireGuardPeer, error) {
-	query := `
-		UPDATE wireguard_peers 
-		SET name = ?, allowed_ips = ?, endpoint = ?, persistent_keepalive = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`
-
-	_, err := s.db.Exec(query, req.Name, req.AllowedIPs, req.Endpoint, req.PersistentKeepalive, id)
+	_, err := s.db.Exec(`
+		UPDATE wireguard_peers
+		SET name=?, allowed_ips=?, endpoint=?, persistent_keepalive=?, updated_at=CURRENT_TIMESTAMP
+		WHERE id=?`,
+		req.Name, req.AllowedIPs, req.Endpoint, req.PersistentKeepalive, id)
 	if err != nil {
-		return nil, fmt.Errorf("failed to update peer: %v", err)
+		return nil, fmt.Errorf("update peer: %w", err)
 	}
 
+	// 找到对应接口，热更新
+	p, _ := s.GetPeer(id)
+	if p != nil {
+		_ = s.ApplyInterfaceConfig(p.InterfaceID)
+	}
 	return s.GetPeer(id)
 }
 
 func (s *WireGuardService) DeletePeer(id int) error {
-	query := "DELETE FROM wireguard_peers WHERE id = ?"
-	result, err := s.db.Exec(query, id)
+	p, err := s.GetPeer(id)
 	if err != nil {
-		return fmt.Errorf("failed to delete peer: %v", err)
+		return err
 	}
-
-	rowsAffected, err := result.RowsAffected()
+	_, err = s.db.Exec(`DELETE FROM wireguard_peers WHERE id=?`, id)
 	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %v", err)
+		return fmt.Errorf("delete peer: %w", err)
 	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("peer not found")
-	}
-
+	// 热更新：从内核清理
+	_ = s.ApplyInterfaceConfig(p.InterfaceID)
 	return nil
 }
 
-// Configuration generation
+/* -------------------- 配置导出（.conf 文本） -------------------- */
+
 func (s *WireGuardService) GetInterfaceConfig(id int) (string, error) {
-	// 1) 读取接口
 	iface, err := s.GetInterface(id)
 	if err != nil {
 		return "", err
 	}
-
-	// 基本校验
-	if iface.PrivateKey == "" || iface.PublicKey == "" {
-		return "", fmt.Errorf("interface keypair is missing")
-	}
-	if strings.TrimSpace(iface.Address) == "" {
-		return "", fmt.Errorf("interface address is required (e.g. 10.6.0.1/24)")
+	if strings.TrimSpace(iface.PrivateKey) == "" {
+		return "", errors.New("interface private key missing")
 	}
 	if iface.ListenPort == 0 {
-		return "", fmt.Errorf("listen port is required")
+		return "", errors.New("listen port required")
 	}
-
-	// 2) 读取该接口下所有 peers
+	if strings.TrimSpace(iface.Address) == "" {
+		return "", errors.New("address required")
+	}
 	peers, err := s.GetPeersByInterface(id)
 	if err != nil {
 		return "", err
 	}
 
 	var b strings.Builder
-
-	// 3) [Interface]（服务器侧）
-	fmt.Fprintf(&b, "[Interface]\n")
-	fmt.Fprintf(&b, "PrivateKey = %s\n", iface.PrivateKey)
-	fmt.Fprintf(&b, "Address = %s\n", iface.Address)
-	fmt.Fprintf(&b, "ListenPort = %d\n", iface.ListenPort)
+	fmt.Fprintf(&b, "[Interface]\nPrivateKey = %s\nAddress = %s\nListenPort = %d\n", iface.PrivateKey, iface.Address, iface.ListenPort)
 	if iface.MTU > 0 {
 		fmt.Fprintf(&b, "MTU = %d\n", iface.MTU)
 	}
-	// 一般 DNS 只下发给客户端，这里可不写；若你需要也可写：
 	if strings.TrimSpace(iface.DNS) != "" {
 		fmt.Fprintf(&b, "DNS = %s\n", iface.DNS)
 	}
 
-	// 4) [Peer] 列出所有对端（服务端视角）
 	for _, p := range peers {
 		if strings.TrimSpace(p.PublicKey) == "" {
 			continue
 		}
-		fmt.Fprintf(&b, "\n[Peer]\n")
-		fmt.Fprintf(&b, "PublicKey = %s\n", p.PublicKey)
-
-		// 服务器侧 AllowedIPs：通常填该 peer 的隧道地址（最小路由）
-		allowed := strings.TrimSpace(p.IP)
-		if allowed == "" && strings.TrimSpace(p.AllowedIPs) != "" {
-			// 如果你想用自定义更大网段，就用 allowed_ips
-			allowed = p.AllowedIPs
+		fmt.Fprintf(&b, "\n[Peer]\nPublicKey = %s\n", p.PublicKey)
+		if strings.TrimSpace(p.AllowedIPs) != "" {
+			fmt.Fprintf(&b, "AllowedIPs = %s\n", p.AllowedIPs)
 		}
-		if allowed != "" {
-			fmt.Fprintf(&b, "AllowedIPs = %s\n", allowed)
+		if strings.TrimSpace(p.Endpoint) != "" {
+			fmt.Fprintf(&b, "Endpoint = %s\n", p.Endpoint)
 		}
-		// 你的 schema 没有 peer 的 endpoint，这里就不写 Endpoint
+		if p.PersistentKeepalive > 0 {
+			fmt.Fprintf(&b, "PersistentKeepalive = %d\n", p.PersistentKeepalive)
+		}
 	}
-
 	return b.String(), nil
-}
-
-func (s *WireGuardService) getInterfaceActualStatus(name string) string {
-	// A. 尝试 wgctrl：能拿到设备说明接口已创建（通常也在 up 状态）
-	if s.client != nil {
-		if _, err := s.client.Device(name); err == nil {
-			return "running"
-		}
-		// 继续降级，用于进一步判断
-	}
-	return "running"
 }
 
 func (s *WireGuardService) GetPeerConfig(id int) (string, error) {
@@ -718,104 +496,260 @@ func (s *WireGuardService) GetPeerConfig(id int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
 	iface, err := s.GetInterface(peer.InterfaceID)
 	if err != nil {
 		return "", err
 	}
-
-	config := fmt.Sprintf(`[Interface]
+	if strings.TrimSpace(peer.PrivateKey) == "" {
+		return "", errors.New("peer private key missing for client config")
+	}
+	// 默认生成全局路由的客户端配置；按需改
+	cfg := fmt.Sprintf(`[Interface]
 PrivateKey = %s
 Address = %s
 `, peer.PrivateKey, peer.AllowedIPs)
-
-	if iface.DNS != "" {
-		config += fmt.Sprintf("DNS = %s\n", iface.DNS)
+	if strings.TrimSpace(iface.DNS) != "" {
+		cfg += fmt.Sprintf("DNS = %s\n", iface.DNS)
 	}
-
-	config += fmt.Sprintf(`
+	cfg += fmt.Sprintf(`
 [Peer]
 PublicKey = %s
-AllowedIPs = 0.0.0.0/0
+AllowedIPs = 0.0.0.0/0, ::/0
 Endpoint = your-server-ip:%d
 `, iface.PublicKey, iface.ListenPort)
-
 	if peer.PersistentKeepalive > 0 {
-		config += fmt.Sprintf("PersistentKeepalive = %d\n", peer.PersistentKeepalive)
+		cfg += fmt.Sprintf("PersistentKeepalive = %d\n", peer.PersistentKeepalive)
 	}
-
-	return config, nil
+	return cfg, nil
 }
 
-// Status updates (simulate real WireGuard status)
-func (s *WireGuardService) UpdatePeerStatus() error {
-	// This would normally read from actual WireGuard status
-	// For now, we'll simulate some status updates
-	peers, err := s.GetPeers()
+/* -------------------- 核心：应用配置到内核（wgctrl） -------------------- */
+
+// 把 DB 中的 interface+peers 一次性下发到内核（幂等，ReplacePeers）
+func (s *WireGuardService) ApplyInterfaceConfig(interfaceID int) error {
+	if s.client == nil {
+		c, err := wgctrl.New()
+		if err != nil {
+			return fmt.Errorf("wgctrl new: %w", err)
+		}
+		s.client = c
+	}
+
+	iface, err := s.GetInterface(interfaceID)
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(iface.PrivateKey) == "" {
+		return errors.New("interface private key missing")
+	}
+	priv, err := parseWGPrivateKey(iface.PrivateKey)
+	if err != nil {
+		return err
+	}
+	// 若 DB 公钥为空，用私钥派生并回写一次
+	if strings.TrimSpace(iface.PublicKey) == "" {
+		_, _ = s.db.Exec(`UPDATE wireguard_interfaces SET public_key=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, priv.PublicKey().String(), iface.ID)
+	}
 
-	for _, peer := range peers {
-		// Simulate random status updates
-		if peer.Status == "connected" {
-			// Update last handshake and traffic
-			now := time.Now()
-			query := `
-				UPDATE wireguard_peers 
-				SET last_handshake = ?, bytes_received = bytes_received + ?, bytes_sent = bytes_sent + ?
-				WHERE id = ?
-			`
-			_, err := s.db.Exec(query, &now, 1024+int64(peer.ID)*100, 512+int64(peer.ID)*50, peer.ID)
+	// 1) 确保链路存在
+	if err := ipEnsureLink(iface.Name); err != nil {
+		return err
+	}
+
+	// 2) 组装 PeerConfig
+	peers, err := s.GetPeersByInterface(interfaceID)
+	if err != nil {
+		return err
+	}
+	var peerCfgs []wgtypes.PeerConfig
+	for _, p := range peers {
+		if strings.TrimSpace(p.PublicKey) == "" {
+			continue
+		}
+		pub, err := parseWGPublicKey(p.PublicKey)
+		if err != nil {
+			return fmt.Errorf("peer %d pubkey: %w", p.ID, err)
+		}
+		allowed, err := parseAllowedIPs(p.AllowedIPs)
+		if err != nil {
+			return fmt.Errorf("peer %d allowedIPs: %w", p.ID, err)
+		}
+		var eps *net.UDPAddr
+		if strings.TrimSpace(p.Endpoint) != "" {
+			eps, err = parseEndpoint(p.Endpoint)
 			if err != nil {
-				return fmt.Errorf("failed to update peer status: %v", err)
+				return fmt.Errorf("peer %d endpoint: %w", p.ID, err)
+			}
+		}
+		pc := wgtypes.PeerConfig{
+			PublicKey:                   *pub,
+			Remove:                      false,
+			ReplaceAllowedIPs:           true,
+			AllowedIPs:                  allowed,
+			PersistentKeepaliveInterval: durationPtrSeconds(p.PersistentKeepalive),
+			Endpoint:                    eps,
+		}
+		peerCfgs = append(peerCfgs, pc)
+	}
+
+	// 3) 写入设备配置（私钥、监听端口、peers）
+	cfg := wgtypes.Config{
+		PrivateKey:   priv,
+		ListenPort:   intPtr(iface.ListenPort),
+		ReplacePeers: true,
+		Peers:        peerCfgs,
+	}
+	if err := s.client.ConfigureDevice(iface.Name, cfg); err != nil {
+		return fmt.Errorf("configure device: %w", err)
+	}
+
+	// 4) 地址/MTU & up
+	if err := ipAddrReplace(iface.Name, iface.Address); err != nil {
+		return err
+	}
+	if err := ipSetMTU(iface.Name, iface.MTU); err != nil {
+		return err
+	}
+	if err := ipLinkUp(iface.Name); err != nil {
+		return err
+	}
+
+	_, _ = s.db.Exec(`UPDATE wireguard_interfaces SET status='running', updated_at=CURRENT_TIMESTAMP WHERE id=?`, interfaceID)
+	return nil
+}
+
+/* -------------------- 启停（不再用 wg-quick） -------------------- */
+
+func (s *WireGuardService) StartInterface(id int) error {
+	return s.ApplyInterfaceConfig(id)
+}
+
+func (s *WireGuardService) StopInterface(id int) error {
+	iface, err := s.GetInterface(id)
+	if err != nil {
+		return err
+	}
+	// 先 link down，再删设备（更干净）
+	_ = ipLinkDown(iface.Name)
+	_ = ipLinkDel(iface.Name)
+
+	_, _ = s.db.Exec(`UPDATE wireguard_interfaces SET status='stopped', updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+	return nil
+}
+
+func (s *WireGuardService) RestartInterface(id int) error {
+	_ = s.StopInterface(id)
+	time.Sleep(200 * time.Millisecond)
+	return s.StartInterface(id)
+}
+
+func (s *WireGuardService) RestartService() error {
+	ifaces, err := s.GetInterfaces()
+	if err != nil {
+		return err
+	}
+	var errs []string
+	for _, it := range ifaces {
+		if err := s.RestartInterface(it.ID); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", it.Name, err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("restart finished with errors: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+/* -------------------- 实时状态（wgctrl） -------------------- */
+
+func (s *WireGuardService) GetInterfaceStatus(id int) (*models.InterfaceStatus, error) {
+	iface, err := s.GetInterface(id)
+	if err != nil {
+		return nil, err
+	}
+	up, index := false, 0
+	if ifi, _ := net.InterfaceByName(iface.Name); ifi != nil {
+		up = (ifi.Flags & net.FlagUp) != 0
+		index = ifi.Index
+	}
+
+	st := &models.InterfaceStatus{
+		ID:         id,
+		Name:       iface.Name,
+		Up:         up,
+		Index:      index,
+		ListenPort: 0,
+		Peers:      []models.PeerStatus{},
+	}
+
+	// 地址
+	if ifi, _ := net.InterfaceByName(iface.Name); ifi != nil {
+		if addrs, _ := ifi.Addrs(); len(addrs) > 0 {
+			for _, a := range addrs {
+				st.AddressCIDRs = append(st.AddressCIDRs, a.String())
 			}
 		}
 	}
 
-	return nil
+	// 设备/Peers
+	c := s.client
+	if c == nil {
+		var err error
+		c, err = wgctrl.New()
+		if err != nil {
+			// 返回链路层信息即可
+			return st, nil
+		}
+		defer c.Close()
+	}
+	dev, err := c.Device(iface.Name)
+	if err != nil {
+		return st, nil // 未创建/未启动
+	}
+	st.ListenPort = dev.ListenPort
+	for _, p := range dev.Peers {
+		ps := models.PeerStatus{
+			PublicKey: p.PublicKey.String(),
+			Endpoint: func() string {
+				if p.Endpoint != nil {
+					return p.Endpoint.String()
+				}
+				return ""
+			}(),
+			LatestHandshake: p.LastHandshakeTime.Unix(),
+			TransferRx:      int64(p.ReceiveBytes),
+			TransferTx:      int64(p.TransmitBytes),
+			AllowedIPs:      make([]string, 0, len(p.AllowedIPs)),
+		}
+		for _, ipn := range p.AllowedIPs {
+			ps.AllowedIPs = append(ps.AllowedIPs, ipn.String())
+		}
+		st.Peers = append(st.Peers, ps)
+	}
+	st.PeersCount = len(st.Peers)
+	return st, nil
 }
 
-// RestartService 尝试整体重启 wg-quick 服务；失败则逐接口 down/up 兜底
-func (s *WireGuardService) RestartService() error {
-	// 方案 A：systemd 一键重启（存在则成功最省事）
-	if out, err := exec.Command("bash", "-lc",
-		`systemctl daemon-reload >/dev/null 2>&1 || true; `+
-			`systemctl restart 'wg-quick@*.service' 2>&1 || systemctl restart wg-quick@wg0.service 2>&1`).CombinedOutput(); err == nil {
-		return nil
-	} else {
-		// 不中断，继续兜底
-		_ = out
+/* -------------------- 可选：状态推送（供 SSE/WS 用） -------------------- */
+
+func (s *WireGuardService) WatchInterfaceStatus(ctx context.Context, id int, interval time.Duration, onUpdate func(*models.InterfaceStatus)) {
+	if interval <= 0 {
+		interval = time.Second
 	}
-
-	// 方案 B 兜底：对数据库里记录的接口逐一 down/up
-	ifaces, err := s.GetInterfaces()
-	if err != nil {
-		return fmt.Errorf("restart fallback: list interfaces: %w", err)
-	}
-
-	var errs []string
-	for _, iface := range ifaces {
-		// 如果你只想重启“已运行”的，可以判断 iface.Status == "running"
-		// 先尝试 down（即使没启动也无所谓）
-		if out, err := exec.Command("bash", "-lc", fmt.Sprintf("wg-quick down %q", iface.Name)).CombinedOutput(); err != nil {
-			// 不是致命错误，记录后继续
-			errs = append(errs, fmt.Sprintf("down %s: %v (%s)", iface.Name, err, strings.TrimSpace(string(out))))
-		}
-		// 再 up
-		if out, err := exec.Command("bash", "-lc", fmt.Sprintf("wg-quick up %q", iface.Name)).CombinedOutput(); err != nil {
-			errs = append(errs, fmt.Sprintf("up %s: %v (%s)", iface.Name, err, strings.TrimSpace(string(out))))
-			continue
-		}
-
-		// 可选：更新 DB 状态为 running
-		if _, err := s.db.Exec(`UPDATE wireguard_interfaces SET status='running', updated_at=CURRENT_TIMESTAMP WHERE id=?`, iface.ID); err != nil {
-			errs = append(errs, fmt.Sprintf("db update %s: %v", iface.Name, err))
+	push := func() {
+		if st, err := s.GetInterfaceStatus(id); err == nil && onUpdate != nil {
+			onUpdate(st)
 		}
 	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("restart fallback finished with errors: %s", strings.Join(errs, "; "))
+	push()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			push()
+		}
 	}
-	return nil
 }
