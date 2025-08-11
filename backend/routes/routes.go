@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/swaggo/files"
 	"github.com/swaggo/gin-swagger"
+	"time"
 )
 
 func SetupRoutes(
@@ -22,13 +23,15 @@ func SetupRoutes(
 
 	// CORS middleware
 	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"*"}, // Allow all origins
+		AllowOriginFunc: func(origin string) bool {
+			return true // 允许所有来源
+		},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
 		ExposeHeaders:    []string{"Content-Length"},
 		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
 	}))
-
 	// Handlers
 	authHandler := handlers.NewAuthHandler(authService)
 	wgHandler := handlers.NewWireGuardHandler(wgService)
