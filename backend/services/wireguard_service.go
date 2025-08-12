@@ -382,13 +382,31 @@ func (s *WireGuardService) GetPeers() ([]models.WireGuardPeer, error) {
 	var list []models.WireGuardPeer
 	for rows.Next() {
 		var p models.WireGuardPeer
+		var last sql.NullTime
+
 		if err := rows.Scan(
-			&p.ID, &p.InterfaceID, &p.Name, &p.PublicKey, &p.PrivateKey,
-			&p.AllowedIPs, &p.Endpoint, &p.PersistentKeepalive, &p.Status,
-			&p.LastHandshake, &p.BytesReceived, &p.BytesSent,
-			&p.CreatedAt, &p.UpdatedAt,
+			&p.ID,
+			&p.InterfaceID,
+			&p.InterfaceName, // i.name
+			&p.Name,
+			&p.IP, // p.ip
+			&p.AllowedIPs,
+			&p.Endpoint,
+			&p.PersistentKeepalive,
+			&p.PublicKey,
+			&p.PrivateKey,
+			&p.Status,
+			&last,
+			&p.BytesReceived,
+			&p.BytesSent,
+			&p.CreatedAt,
+			&p.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)
+		}
+		if last.Valid {
+			t := last.Time
+			p.LastHandshake = &t // 若你的字段不是 *time.Time，请按需改
 		}
 		list = append(list, p)
 	}
