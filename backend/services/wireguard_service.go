@@ -640,7 +640,7 @@ func (s *WireGuardService) UpdatePeer(ctx context.Context, id int, req *models.U
 }
 
 func (s *WireGuardService) getPeerByID(ctx context.Context, id int) (*Peer, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, interface_id, name, ip, allowed_ips, endpoint, persistent_keepalive, public_key, private_key FROM wireguard_peers WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, interface_id, name, ip, allowed_ips, endpoint, persistent_keepalive, public_key FROM wireguard_peers WHERE id = ?`, id)
 	var p Peer
 	if err := row.Scan(&p.ID, &p.InterfaceID, &p.Name, &p.IP, &p.AllowedIPs, &p.Endpoint, &p.PersistentKeepalive, &p.PublicKey); err != nil {
 		return nil, err
