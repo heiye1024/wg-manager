@@ -152,16 +152,33 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
       setLoading(true)
       const response = await wireguardApi.getPeers()
       if (response.success) {
-        // Ensure peers始终是数组
-        setPeers(Array.isArray(response.data) ? response.data : [])
+        const rows = Array.isArray(response.data) ? response.data : []
+
+        const mapped: Peer[] = rows.map((r: any) => ({
+          id: String(r.id),
+          // 名称优先用 r.name，没有就回退用公钥前8位
+          name: (r.name && String(r.name)) || (r.public_key ? String(r.public_key).slice(0, 8) : `peer-${r.id}`),
+          public_key: r.public_key || "",
+          allowed_ips: r.allowed_ips || "",
+          endpoint: r.endpoint || "",
+          // 后端 last_handshake -> 前端 latest_handshake（字符串或 undefined）
+          latest_handshake: r.last_handshake ? String(r.last_handshake) : undefined,
+          // 后端 bytes_received/sent -> 前端 transfer_rx/tx（数字，容错为 0）
+          transfer_rx: Number.isFinite(Number(r.bytes_received)) ? Number(r.bytes_received) : 0,
+          transfer_tx: Number.isFinite(Number(r.bytes_sent)) ? Number(r.bytes_sent) : 0,
+          // 容错：undefined/空串不传
+          persistent_keepalive: r.persistent_keepalive != null ? Number(r.persistent_keepalive) : undefined,
+          // 规范化状态
+          status: r.status === "connected" ? "connected" : r.status === "disconnected" ? "disconnected" : "unknown",
+          // 统一成 string，便于和下拉筛选/接口列表匹配
+          interface_id: String(r.interface_id),
+        }))
+
+        setPeers(mapped)
       }
     } catch (error) {
       console.error("Failed to load peers:", error)
-      toast({
-        title: "错误",
-        description: "加载客户端连接失败",
-        variant: "destructive",
-      })
+      toast({ title: "错误", description: "加载客户端连接失败", variant: "destructive" })
     } finally {
       setLoading(false)
     }
@@ -228,19 +245,31 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
   const handleEdit = async () => {
     if (!editingPeer) return
 
-    try {
-      const response = await wireguardApi.updatePeer(editingPeer.id, {
-        name: formData.name,
-        allowed_ips: formData.allowed_ips,
-        endpoint: formData.endpoint,
-        persistent_keepalive: formData.persistent_keepalive,
-      })
+    // 组装 payload：只带有变更且合法的字段
+    const payload: any = {}
+    const name = formData.name.trim()
+    if (name) payload.name = name
 
+    const ips = formData.allowed_ips.trim()
+    if (ips) payload.allowed_ips = ips
+
+    const ep = formData.endpoint.trim()
+    if (ep) payload.endpoint = ep
+
+    // 关键：为空就不传；有值则转 number
+    if (formData.persistent_keepalive !== "") {
+      const n = Number(formData.persistent_keepalive)
+      if (!Number.isFinite(n) || n < 0) {
+        toast({ title: "无效的保活秒数", description: "请输入大于等于 0 的整数", variant: "destructive" })
+        return
+      }
+      payload.persistent_keepalive = n
+    }
+
+    try {
+      const response = await wireguardApi.updatePeer(editingPeer.id, payload)
       if (response.success) {
-        toast({
-          title: "成功",
-          description: "客户端连接更新成功",
-        })
+        toast({ title: "成功", description: "客户端连接更新成功" })
         setEditDialogOpen(false)
         setEditingPeer(null)
         resetForm()
