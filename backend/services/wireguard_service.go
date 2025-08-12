@@ -847,6 +847,92 @@ func (s *WireGuardService) GetInterfaceConfig(id int) (string, error) {
     return b.String(), nil
 }
 
+
+func (s *WireGuardService) GetPeerConfig(peerID int) (string, error) {
+    row := s.db.QueryRow(`
+        SELECT
+          COALESCE(p.name,''), 
+          COALESCE(p.private_key,''),       -- 客户端私钥
+          COALESCE(p.ip,''),                -- 客户端隧道 IP
+          COALESCE(p.persistent_keepalive,0),
+
+          COALESCE(i.name,''), i.listen_port,
+          COALESCE(i.address,''),           -- 形如 10.9.0.1/24
+          COALESCE(i.cidr,''),              -- 形如 10.9.0.0/24（可能为空）
+          COALESCE(i.server_ip,''),         -- 形如 10.9.0.1（可能为空）
+          COALESCE(i.dns,''),               -- 接口 DNS
+          COALESCE(i.public_key,'')         -- 服务端公钥（给 [Peer].PublicKey）
+        FROM wireguard_peers p
+        JOIN wireguard_interfaces i ON i.id = p.interface_id
+        WHERE p.id = ?`, peerID)
+
+    var (
+        pName, privKey, peerIP string
+        keepalive              int
+
+        ifName, ifAddress, ifCIDR, serverIP, dns, serverPub string
+        listenPort             int
+    )
+    if err := row.Scan(&pName, &privKey, &peerIP, &keepalive,
+        &ifName, &listenPort, &ifAddress, &ifCIDR, &serverIP, &dns, &serverPub); err != nil {
+        if errors.Is(err, sql.ErrNoRows) {
+            return "", fmt.Errorf("peer not found")
+        }
+        return "", err
+    }
+
+    privKey = strings.TrimSpace(privKey)
+    if privKey == "" {
+        return "", fmt.Errorf("peer private key missing")
+    }
+    // 推导 cidr/server_ip：如果表里没写，从 address 推
+    if strings.TrimSpace(ifCIDR) == "" || strings.TrimSpace(serverIP) == "" {
+        if ip, ipNet, err := net.ParseCIDR(strings.TrimSpace(ifAddress)); err == nil && ipNet != nil {
+            if strings.TrimSpace(ifCIDR) == "" { ifCIDR = ipNet.String() }
+            if strings.TrimSpace(serverIP) == "" { serverIP = ip.String() }
+        }
+    }
+    // 解析前缀长度
+    _, ipNet, err := net.ParseCIDR(strings.TrimSpace(ifCIDR))
+    if err != nil {
+        return "", fmt.Errorf("bad interface cidr: %v", err)
+    }
+    if strings.TrimSpace(peerIP) == "" {
+        return "", fmt.Errorf("peer ip missing")
+    }
+    ones, _ := ipNet.Mask.Size() // 例如 24
+
+    // 客户端 Address 用同样前缀长度
+    address := fmt.Sprintf("%s/%d", strings.TrimSpace(peerIP), ones)
+
+    // AllowedIPs：默认用接口 CIDR（分流访问内网）
+    allowed := strings.TrimSpace(ifCIDR)
+
+    // Endpoint：优先环境变量 WG_PUBLIC_ENDPOINT（域名/公网 IP），否则用 server_ip
+    host := strings.TrimSpace(os.Getenv("WG_PUBLIC_ENDPOINT"))
+    if host == "" {
+        host = strings.TrimSpace(serverIP)
+    }
+    endpoint := net.JoinHostPort(host, strconv.Itoa(listenPort))
+
+    if keepalive <= 0 { keepalive = 25 }
+    if strings.TrimSpace(dns) == "" { dns = "1.1.1.1" }
+
+    cfg := strings.TrimSpace(fmt.Sprintf(`[Interface]
+PrivateKey = %s
+Address = %s
+DNS = %s
+
+[Peer]
+PublicKey = %s
+AllowedIPs = %s
+Endpoint = %s
+PersistentKeepalive = %d
+`, privKey, address, strings.TrimSpace(dns), strings.TrimSpace(serverPub), allowed, endpoint, keepalive))
+
+    return cfg, nil
+}
+
 /* -------------------- 核心：应用配置到内核（wgctrl） -------------------- */
 
 // 把 DB 中的 interface+peers 一次性下发到内核（幂等，ReplacePeers）
