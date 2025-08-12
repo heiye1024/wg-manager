@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 type WireGuardHandler struct {
@@ -399,7 +400,10 @@ func (h *WireGuardHandler) GetPeerConfig(c *gin.Context) {
 		return
 	}
 
-	config, err := h.service.GetPeerConfig(id)
+	// 支持自动生成/回填私钥：?regenerate=1 或 ?rotate=1
+	regenerate := c.Query("regenerate") == "1" || c.Query("rotate") == "1"
+
+	config, err := h.service.GetPeerConfig(id, regenerate) // ← 这里传第二个参数
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.APIResponse{
 			Success: false,
@@ -408,7 +412,7 @@ func (h *WireGuardHandler) GetPeerConfig(c *gin.Context) {
 		return
 	}
 
-	c.Header("Content-Type", "text/plain")
+	c.Header("Content-Type", "text/plain; charset=utf-8")
 	c.Header("Content-Disposition", "attachment; filename=wg-peer.conf")
 	c.String(http.StatusOK, config)
 }
