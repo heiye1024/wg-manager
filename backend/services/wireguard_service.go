@@ -776,82 +776,77 @@ func (s *WireGuardService) DeletePeer(id int) error {
 
 /* -------------------- 配置导出（.conf 文本） -------------------- */
 
+func (s *WireGuardService) GetPeerConfig(peerID int) (string, error) {
+    // 查 Peer + Interface
+    row := s.db.QueryRow(`
+        SELECT 
+          p.name, COALESCE(p.public_key,''), COALESCE(p.private_key,''), COALESCE(p.ip,''), 
+          COALESCE(p.persistent_keepalive,0),
+          i.name, i.listen_port, COALESCE(i.address,''), 
+          COALESCE(i.cidr,''), COALESCE(i.server_ip,''), COALESCE(i.dns,'')
+        FROM wireguard_peers p
+        JOIN wireguard_interfaces i ON i.id = p.interface_id
+        WHERE p.id = ?`, peerID)
 
+    var (
+        pName, pubKey, privKey, peerIP string
+        keepalive                      int
+        ifName, ifAddress, ifCIDR, serverIP, dns string
+        listenPort                     int
+    )
+    if err := row.Scan(&pName, &pubKey, &privKey, &peerIP, &keepalive,
+        &ifName, &listenPort, &ifAddress, &ifCIDR, &serverIP, &dns); err != nil {
+        if errors.Is(err, sql.ErrNoRows) {
+            return "", fmt.Errorf("peer not found")
+        }
+        return "", err
+    }
+    if strings.TrimSpace(privKey) == "" {
+        return "", fmt.Errorf("peer private key missing")
+    }
+    // 推导 cidr/server_ip（若表里为空则从 address 推）
+    if strings.TrimSpace(ifCIDR) == "" || strings.TrimSpace(serverIP) == "" {
+        if ip, ipNet, err := net.ParseCIDR(strings.TrimSpace(ifAddress)); err == nil && ipNet != nil {
+            if ifCIDR == "" { ifCIDR = ipNet.String() }
+            if serverIP == "" { serverIP = ip.String() }
+        }
+    }
+    // 解析接口前缀长度
+    _, ipNet, err := net.ParseCIDR(strings.TrimSpace(ifCIDR))
+    if err != nil {
+        return "", fmt.Errorf("bad interface cidr: %v", err)
+    }
+    ones, _ := ipNet.Mask.Size()
+    if peerIP == "" {
+        return "", fmt.Errorf("peer ip missing")
+    }
+    // 客户端 Address 与接口前缀一致
+    address := fmt.Sprintf("%s/%d", peerIP, ones)
+    // 分流：客户端 AllowedIPs 用接口网段（而不是 0.0.0.0/0）
+    allowed := ifCIDR
 
-func (s *WireGuardService) GetInterfaceConfig(id int) (string, error) {
-	iface, err := s.GetInterface(id)
-	if err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(iface.PrivateKey) == "" {
-		return "", errors.New("interface private key missing")
-	}
-	if iface.ListenPort == 0 {
-		return "", errors.New("listen port required")
-	}
-	if strings.TrimSpace(iface.Address) == "" {
-		return "", errors.New("address required")
-	}
+    // 组装 Endpoint：优先环境变量（公网地址/域名），否则用 server_ip
+    host := strings.TrimSpace(os.Getenv("WG_PUBLIC_ENDPOINT"))
+    if host == "" { host = strings.TrimSpace(serverIP) }
+    endpoint := net.JoinHostPort(host, strconv.Itoa(listenPort))
 
-	peers, err := s.GetPeersByInterface(id)
-	if err != nil {
-		return "", err
-	}
+    // 兜底 keepalive
+    if keepalive <= 0 { keepalive = 25 }
+    if dns == "" { dns = "1.1.1.1" }
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "[Interface]\nPrivateKey = %s\nAddress = %s\nListenPort = %d\n",
-		strings.TrimSpace(iface.PrivateKey),
-		strings.TrimSpace(iface.Address),
-		iface.ListenPort,
-	)
-	if iface.MTU > 0 {
-		fmt.Fprintf(&b, "MTU = %d\n", iface.MTU)
-	}
-	if strings.TrimSpace(iface.DNS) != "" {
-		// DNS 主要用于客户端；这里保留兼容 wg-quick 的行为
-		fmt.Fprintf(&b, "DNS = %s\n", strings.TrimSpace(iface.DNS))
-	}
+    cfg := strings.TrimSpace(fmt.Sprintf(`[Interface]
+PrivateKey = %s
+Address = %s
+DNS = %s
 
-	for _, p := range peers {
-		pk := strings.TrimSpace(p.PublicKey)
-		if pk == "" {
-			continue
-		}
-		fmt.Fprintf(&b, "\n[Peer]\nPublicKey = %s\n", pk)
+[Peer]
+PublicKey = %s
+AllowedIPs = %s
+Endpoint = %s
+PersistentKeepalive = %d
+`, strings.TrimSpace(privKey), address, dns, strings.TrimSpace(pubKey), allowed, endpoint, keepalive))
 
-		// —— AllowedIPs（服务端：应为每个客户端本机隧道地址）——
-		allowed := strings.TrimSpace(p.AllowedIPs)
-		if allowed == "" || containsDefaultRoute(allowed) {
-			ip := strings.TrimSpace(p.IP) // 你表里已有 ip 字段
-			if ip != "" {
-				if net.ParseIP(ip).To4() != nil {
-					allowed = ip + "/32"
-				} else {
-					allowed = ip + "/128"
-				}
-			} else {
-				// 没有 ip 就不要写 AllowedIPs（让配置更安全）
-				allowed = ""
-			}
-		}
-		if allowed != "" {
-			fmt.Fprintf(&b, "AllowedIPs = %s\n", allowed)
-		}
-
-		if ps := strings.TrimSpace(p.PresharedKey); ps != "" {
-			fmt.Fprintf(&b, "PresharedKey = %s\n", ps)
-		}
-		if ep := strings.TrimSpace(p.Endpoint); ep != "" {
-			// 服务端通常不需要 Endpoint（除非是站点间静态对接）
-			fmt.Fprintf(&b, "Endpoint = %s\n", ep)
-		}
-		if p.PersistentKeepalive > 0 {
-			// Keepalive 设置在哪一侧生效取决于谁需要“主动打洞”
-			fmt.Fprintf(&b, "PersistentKeepalive = %d\n", p.PersistentKeepalive)
-		}
-	}
-
-	return b.String(), nil
+    return cfg, nil
 }
 
 /* -------------------- 核心：应用配置到内核（wgctrl） -------------------- */
