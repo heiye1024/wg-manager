@@ -216,6 +216,19 @@ func isUniqueError(err error) bool {
 	return false
 }
 
+
+func containsDefaultRoute(s string) bool {
+	// true if 包含 0.0.0.0/0 或 ::/0
+	ss := strings.Split(s, ",")
+	for _, x := range ss {
+		x = strings.TrimSpace(x)
+		if x == "0.0.0.0/0" || x == "::/0" {
+			return true
+		}
+	}
+	return false
+}
+
 /* -------------------- 接口（DB） -------------------- */
 
 func (s *WireGuardService) GetInterfaces() ([]models.WireGuardInterface, error) {
@@ -790,36 +803,80 @@ func (s *WireGuardService) GetInterfaceConfig(id int) (string, error) {
 	return b.String(), nil
 }
 
-func (s *WireGuardService) GetPeerConfig(id int) (string, error) {
-	peer, err := s.GetPeer(id)
+func (s *WireGuardService) GetInterfaceConfig(id int) (string, error) {
+	iface, err := s.GetInterface(id)
 	if err != nil {
 		return "", err
 	}
-	iface, err := s.GetInterface(peer.InterfaceID)
+	if strings.TrimSpace(iface.PrivateKey) == "" {
+		return "", errors.New("interface private key missing")
+	}
+	if iface.ListenPort == 0 {
+		return "", errors.New("listen port required")
+	}
+	if strings.TrimSpace(iface.Address) == "" {
+		return "", errors.New("address required")
+	}
+
+	peers, err := s.GetPeersByInterface(id)
 	if err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(peer.PrivateKey) == "" {
-		return "", errors.New("peer private key missing for client config")
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "[Interface]\nPrivateKey = %s\nAddress = %s\nListenPort = %d\n",
+		strings.TrimSpace(iface.PrivateKey),
+		strings.TrimSpace(iface.Address),
+		iface.ListenPort,
+	)
+	if iface.MTU > 0 {
+		fmt.Fprintf(&b, "MTU = %d\n", iface.MTU)
 	}
-	// 默认生成全局路由的客户端配置；按需改
-	cfg := fmt.Sprintf(`[Interface]
-PrivateKey = %s
-Address = %s
-`, peer.PrivateKey, peer.AllowedIPs)
 	if strings.TrimSpace(iface.DNS) != "" {
-		cfg += fmt.Sprintf("DNS = %s\n", iface.DNS)
+		// DNS 主要用于客户端；这里保留兼容 wg-quick 的行为
+		fmt.Fprintf(&b, "DNS = %s\n", strings.TrimSpace(iface.DNS))
 	}
-	cfg += fmt.Sprintf(`
-[Peer]
-PublicKey = %s
-AllowedIPs = 0.0.0.0/0, ::/0
-Endpoint = your-server-ip:%d
-`, iface.PublicKey, iface.ListenPort)
-	if peer.PersistentKeepalive > 0 {
-		cfg += fmt.Sprintf("PersistentKeepalive = %d\n", peer.PersistentKeepalive)
+
+	for _, p := range peers {
+		pk := strings.TrimSpace(p.PublicKey)
+		if pk == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n[Peer]\nPublicKey = %s\n", pk)
+
+		// —— AllowedIPs（服务端：应为每个客户端本机隧道地址）——
+		allowed := strings.TrimSpace(p.AllowedIPs)
+		if allowed == "" || containsDefaultRoute(allowed) {
+			ip := strings.TrimSpace(p.IP) // 你表里已有 ip 字段
+			if ip != "" {
+				if net.ParseIP(ip).To4() != nil {
+					allowed = ip + "/32"
+				} else {
+					allowed = ip + "/128"
+				}
+			} else {
+				// 没有 ip 就不要写 AllowedIPs（让配置更安全）
+				allowed = ""
+			}
+		}
+		if allowed != "" {
+			fmt.Fprintf(&b, "AllowedIPs = %s\n", allowed)
+		}
+
+		if ps := strings.TrimSpace(p.PresharedKey); ps != "" {
+			fmt.Fprintf(&b, "PresharedKey = %s\n", ps)
+		}
+		if ep := strings.TrimSpace(p.Endpoint); ep != "" {
+			// 服务端通常不需要 Endpoint（除非是站点间静态对接）
+			fmt.Fprintf(&b, "Endpoint = %s\n", ep)
+		}
+		if p.PersistentKeepalive > 0 {
+			// Keepalive 设置在哪一侧生效取决于谁需要“主动打洞”
+			fmt.Fprintf(&b, "PersistentKeepalive = %d\n", p.PersistentKeepalive)
+		}
 	}
-	return cfg, nil
+
+	return b.String(), nil
 }
 
 /* -------------------- 核心：应用配置到内核（wgctrl） -------------------- */
