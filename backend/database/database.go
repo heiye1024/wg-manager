@@ -2,9 +2,11 @@ package database
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,13 +148,17 @@ func importWireGuardConf(db *sql.DB, path string) error {
 }
 
 func createTables(db *sql.DB) error {
-	queries := []string{
+	// SQLite: 开启外键（其他数据库无影响）
+	_, _ = db.Exec(`PRAGMA foreign_keys = ON`)
+
+	// 1) 基础表（新库会直接带上 cidr/server_ip、endpoint、persistent_keepalive）
+	creates := []string{
 		`CREATE TABLE IF NOT EXISTS users (
 		   id INTEGER PRIMARY KEY AUTOINCREMENT,
 		   username TEXT UNIQUE NOT NULL,
 		   password_hash TEXT NOT NULL,
 		   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	   )`,
+		)`,
 		`CREATE TABLE IF NOT EXISTS wireguard_interfaces (
 		  id INTEGER PRIMARY KEY AUTOINCREMENT,
 		  name TEXT UNIQUE NOT NULL,
@@ -163,9 +169,11 @@ func createTables(db *sql.DB) error {
 		  dns TEXT DEFAULT '',
 		  mtu INTEGER DEFAULT 1420,
 		  status TEXT DEFAULT 'inactive',
+		  cidr TEXT,                 -- 接口子网（如 10.8.0.0/24）
+		  server_ip TEXT,            -- 隧道内服务端 IP（如 10.8.0.1）
 		  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	  )`,
+		)`,
 		`CREATE TABLE IF NOT EXISTS wireguard_peers (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			interface_id INTEGER NOT NULL,
@@ -175,6 +183,7 @@ func createTables(db *sql.DB) error {
 			ip TEXT NOT NULL,
 			allowed_ips TEXT NOT NULL,
 			preshared_key TEXT,
+			endpoint TEXT DEFAULT '',
 			persistent_keepalive INTEGER DEFAULT 25,
 			status TEXT DEFAULT 'inactive',
 			last_handshake DATETIME,
@@ -231,32 +240,48 @@ func createTables(db *sql.DB) error {
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 	}
-
-	for _, query := range queries {
-		if _, err := db.Exec(query); err != nil {
-			return fmt.Errorf("failed to execute query: %s, error: %v", query, err)
-		}
+	if err := execMany(db, creates); err != nil {
+		return fmt.Errorf("create base tables: %w", err)
 	}
 
-	// 兼容老表结构，自动补充缺失字段
-	if !columnExists(db, "wireguard_interfaces", "dns") {
-		if _, err := db.Exec(`ALTER TABLE wireguard_interfaces ADD COLUMN dns TEXT DEFAULT ''`); err != nil {
-			log.Printf("[createTables] add dns column failed: %v", err)
+	// 2) 老库兼容：缺列就补（SQLite 无 IF NOT EXISTS，需检查后 ALTER）
+	ensure := func(tbl, col, typ string) {
+		if !columnExists(db, tbl, col) {
+			if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, tbl, col, typ)); err != nil {
+				log.Printf("[createTables] add %s.%s failed: %v", tbl, col, err)
+			}
 		}
 	}
-	if !columnExists(db, "wireguard_interfaces", "mtu") {
-		if _, err := db.Exec(`ALTER TABLE wireguard_interfaces ADD COLUMN mtu INTEGER DEFAULT 1420`); err != nil {
-			log.Printf("[createTables] add mtu column failed: %v", err)
-		}
+	ensure("wireguard_interfaces", "dns", "TEXT DEFAULT ''")
+	ensure("wireguard_interfaces", "mtu", "INTEGER DEFAULT 1420")
+	ensure("wireguard_interfaces", "cidr", "TEXT")
+	ensure("wireguard_interfaces", "server_ip", "TEXT")
+
+	ensure("wireguard_peers", "endpoint", "TEXT DEFAULT ''")
+	ensure("wireguard_peers", "persistent_keepalive", "INTEGER DEFAULT 25")
+
+	// 3) 索引：同一接口下 IP 唯一 + 查询加速
+	indexes := []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_peer_interface_ip ON wireguard_peers(interface_id, ip)`,
+		`CREATE INDEX IF NOT EXISTS idx_peer_interface ON wireguard_peers(interface_id)`,
 	}
-	if !columnExists(db, "wireguard_peers", "endpoint") {
-		if _, err := db.Exec(`ALTER TABLE wireguard_peers ADD COLUMN endpoint TEXT DEFAULT ''`); err != nil {
-			log.Printf("[createTables] add endpoint column failed: %v", err)
-		}
+	if err := execMany(db, indexes); err != nil {
+		return fmt.Errorf("create indexes: %w", err)
 	}
-	if !columnExists(db, "wireguard_peers", "persistent_keepalive") {
-		if _, err := db.Exec(`ALTER TABLE wireguard_peers ADD COLUMN persistent_keepalive INTEGER DEFAULT 0`); err != nil {
-			log.Printf("[createTables] add persistent_keepalive column failed: %v", err)
+
+	// 4) 从 address 回填 cidr/server_ip（仅当为空时）
+	if err := migrateInterfaceCIDR(db); err != nil {
+		return fmt.Errorf("migrate interface cidr/server_ip: %w", err)
+	}
+
+	return nil
+}
+
+// 执行多条 SQL
+func execMany(db *sql.DB, queries []string) error {
+	for _, q := range queries {
+		if _, err := db.Exec(q); err != nil {
+			return fmt.Errorf("exec %q: %w", q, err)
 		}
 	}
 	return nil
@@ -308,4 +333,74 @@ func createDefaultUser(db *sql.DB) error {
 	}
 
 	return err
+}
+
+// 从 address（如 "10.8.0.1/24" 或 "fd00::1/64"）回填 cidr/server_ip（仅在为空时）
+func migrateInterfaceCIDR(db *sql.DB) error {
+	ctx := context.Background()
+
+	type row struct {
+		id       int
+		address  sql.NullString
+		cidr     sql.NullString
+		serverIP sql.NullString
+	}
+	rows, err := db.QueryContext(ctx, `SELECT id, address, cidr, server_ip FROM wireguard_interfaces`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var rs []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.address, &r.cidr, &r.serverIP); err != nil {
+			return err
+		}
+		rs = append(rs, r)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx, `UPDATE wireguard_interfaces SET cidr = ?, server_ip = ? WHERE id = ?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, r := range rs {
+		// 已经有值就跳过
+		if r.cidr.Valid && strings.TrimSpace(r.cidr.String) != "" &&
+			r.serverIP.Valid && strings.TrimSpace(r.serverIP.String) != "" {
+			continue
+		}
+		if !r.address.Valid {
+			continue
+		}
+		addr := strings.TrimSpace(r.address.String)
+		if addr == "" || !strings.Contains(addr, "/") {
+			continue
+		}
+
+		ip, ipNet, err := net.ParseCIDR(addr)
+		if err != nil || ip == nil || ipNet == nil {
+			continue
+		}
+
+		cidr := ipNet.String()  // 网络段，如 10.8.0.0/24
+		serverIP := ip.String() // 服务器 IP，如 10.8.0.1
+
+		if _, err := stmt.ExecContext(ctx, cidr, serverIP, r.id); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }

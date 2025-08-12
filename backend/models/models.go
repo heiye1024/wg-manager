@@ -115,19 +115,19 @@ type UpdateInterfaceRequest struct {
 }
 
 type CreatePeerRequest struct {
-	InterfaceID         int    `json:"interface_id" binding:"required"`
-	Name                string `json:"name" binding:"required"`
-	AllowedIPs          string `json:"allowed_ips" binding:"required"`
-	Endpoint            string `json:"endpoint,omitempty"`
-	PersistentKeepalive int    `json:"persistent_keepalive,omitempty"`
-	PublicKey           string `json:"public_key,omitempty"`
+	InterfaceID         uint    `json:"interface_id" binding:"required"`
+	Name                string  `json:"name" binding:"required"`
+	AllowedIPs          *string `json:"allowed_ips,omitempty"`
+	Endpoint            *string `json:"endpoint,omitempty"`
+	PersistentKeepalive *int    `json:"persistent_keepalive,omitempty"` // 为空则默认 25
+	PublicKey           *string `json:"public_key,omitempty"`
 }
 
 type UpdatePeerRequest struct {
-	Name                string `json:"name"`
-	AllowedIPs          string `json:"allowed_ips"`
-	Endpoint            string `json:"endpoint"`
-	PersistentKeepalive int    `json:"persistent_keepalive"`
+	Name                *string `json:"name,omitempty"`
+	AllowedIPs          *string `json:"allowed_ips,omitempty"`
+	Endpoint            *string `json:"endpoint,omitempty"`
+	PersistentKeepalive *int    `json:"persistent_keepalive,omitempty"` // 为空则默认 25
 }
 
 type APIResponse struct {

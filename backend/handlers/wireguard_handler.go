@@ -3,10 +3,10 @@ package handlers
 import (
 	"backend/models"
 	"backend/services"
+	"errors"
+	"github.com/gin-gonic/gin"
 	"net/http"
 	"strconv"
-
-	"github.com/gin-gonic/gin"
 )
 
 type WireGuardHandler struct {
@@ -295,12 +295,24 @@ func (h *WireGuardHandler) CreatePeer(c *gin.Context) {
 		return
 	}
 
-	peer, err := h.service.CreatePeer(req)
+	// 默认 keepalive = 25（前端可空）
+	if req.PersistentKeepalive == nil {
+		def := 25
+		req.PersistentKeepalive = &def
+	}
+
+	peer, err := h.service.CreatePeer(c.Request.Context(), &req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		switch {
+		case errors.Is(err, services.ErrBadRequest):
+			c.JSON(http.StatusBadRequest, models.APIResponse{Success: false, Error: err.Error()})
+		case errors.Is(err, services.ErrNotFound):
+			c.JSON(http.StatusNotFound, models.APIResponse{Success: false, Error: err.Error()})
+		case errors.Is(err, services.ErrConflict):
+			c.JSON(http.StatusConflict, models.APIResponse{Success: false, Error: err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, models.APIResponse{Success: false, Error: err.Error()})
+		}
 		return
 	}
 
@@ -330,12 +342,18 @@ func (h *WireGuardHandler) UpdatePeer(c *gin.Context) {
 		return
 	}
 
-	peer, err := h.service.UpdatePeer(id, req)
+	peer, err := h.service.UpdatePeer(c.Request.Context(), id, &req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		switch {
+		case errors.Is(err, services.ErrBadRequest):
+			c.JSON(http.StatusBadRequest, models.APIResponse{Success: false, Error: err.Error()})
+		case errors.Is(err, services.ErrNotFound):
+			c.JSON(http.StatusNotFound, models.APIResponse{Success: false, Error: err.Error()})
+		case errors.Is(err, services.ErrConflict):
+			c.JSON(http.StatusConflict, models.APIResponse{Success: false, Error: err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, models.APIResponse{Success: false, Error: err.Error()})
+		}
 		return
 	}
 

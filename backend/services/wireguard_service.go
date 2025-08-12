@@ -1,6 +1,7 @@
 package services
 
 import (
+	"backend/ipam"
 	"backend/models"
 	"context"
 	"database/sql"
@@ -161,6 +162,31 @@ func durationPtrSeconds(sec int) *time.Duration {
 	}
 	d := time.Duration(sec) * time.Second
 	return &d
+}
+
+type ifaceRow struct {
+	ID       uint
+	Name     string
+	CIDR     string
+	ServerIP string
+}
+
+type Peer struct {
+	ID                  uint
+	InterfaceID         uint
+	Name                string
+	IP                  string
+	AllowedIPs          string
+	Endpoint            sql.NullString
+	PersistentKeepalive int
+	PublicKey           sql.NullString
+}
+
+func nullStr(s *string) sql.NullString {
+	if s == nil || strings.TrimSpace(*s) == "" {
+		return sql.NullString{Valid: false}
+	}
+	return sql.NullString{String: strings.TrimSpace(*s), Valid: true}
 }
 
 /* -------------------- 接口（DB） -------------------- */
@@ -383,50 +409,149 @@ func (s *WireGuardService) GetPeer(id int) (*models.WireGuardPeer, error) {
 	return &p, nil
 }
 
-func (s *WireGuardService) CreatePeer(req models.CreatePeerRequest) (*models.WireGuardPeer, error) {
-	pub := strings.TrimSpace(req.PublicKey)
-	priv := "" // CreatePeerRequest 没有 PrivateKey 字段
+func (s *WireGuardService) CreatePeer(ctx context.Context, req *models.CreatePeerRequest) (*Peer, error) {
+	// 默认 keepalive = 25
+	keepalive := 25
+	if req.PersistentKeepalive != nil && *req.PersistentKeepalive > 0 {
+		keepalive = *req.PersistentKeepalive
+	}
 
-	var err error
-	if pub == "" {
-		// 没有提供公钥：内部生成一对（便于之后导出客户端配置）
-		priv, pub, err = s.GenerateKeyPair()
-		if err != nil {
+	// 事务（尽量用串行化以减少并发撞 IP；SQLite/PG/MySQL 都可）
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = tx.Rollback() // 若已提交，会返回 sql.ErrTxDone，忽略即可
+	}()
+
+	// 1) 锁接口行
+	// MySQL/PG: 可在 SELECT 末尾加 FOR UPDATE；SQLite 不支持，依赖串行化事务
+	qIface := "SELECT id, name, cidr, server_ip FROM wireguard_interfaces WHERE id = ?"
+	var iface ifaceRow
+	if err := tx.QueryRowContext(ctx, qIface, req.InterfaceID).Scan(&iface.ID, &iface.Name, &iface.CIDR, &iface.ServerIP); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("interface not found")
+		}
+		return nil, err
+	}
+	if strings.TrimSpace(iface.CIDR) == "" || strings.TrimSpace(iface.ServerIP) == "" {
+		return nil, fmt.Errorf("interface missing cidr/server_ip")
+	}
+
+	// 2) 收集已用 IP（含 server_ip）
+	used := map[string]struct{}{iface.ServerIP: {}}
+	rows, err := tx.QueryContext(ctx, "SELECT ip FROM wireguard_peers WHERE interface_id = ?", req.InterfaceID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			rows.Close()
 			return nil, err
+		}
+		used[ip] = struct{}{}
+	}
+	rows.Close()
+
+	// 3) 分配 IP
+	ipStr, err := ipam.AllocateNextIP(iface.CIDR, used, iface.ServerIP)
+	if err != nil {
+		return nil, err
+	}
+
+	// 4) allowed_ips 兜底
+	allowed := ""
+	if req.AllowedIPs != nil && strings.TrimSpace(*req.AllowedIPs) != "" {
+		allowed = strings.TrimSpace(*req.AllowedIPs)
+	} else {
+		if net.ParseIP(ipStr).To4() != nil {
+			allowed = fmt.Sprintf("%s/32", ipStr)
+		} else {
+			allowed = fmt.Sprintf("%s/128", ipStr)
 		}
 	}
 
-	res, err := s.db.Exec(`
-		INSERT INTO wireguard_peers (interface_id, name, public_key, private_key, allowed_ips, endpoint, persistent_keepalive, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'disconnected')`,
-		req.InterfaceID, req.Name, pub, priv, req.AllowedIPs, req.Endpoint, req.PersistentKeepalive)
+	// 5) 插入
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO wireguard_peers(interface_id, name, ip, allowed_ips, endpoint, persistent_keepalive, public_key)
+         VALUES(?,?,?,?,?,?,?)`,
+		req.InterfaceID, strings.TrimSpace(req.Name), ipStr, allowed, nullStr(req.Endpoint), keepalive, nullStr(req.PublicKey),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("create peer: %w", err)
+		// 唯一键冲突友好化（不同驱动的错误码不同，这里简单用字符串识别）
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			return nil, fmt.Errorf("ip already allocated in this interface")
+		}
+		return nil, err
 	}
-	id, _ := res.LastInsertId()
+	id64, _ := res.LastInsertId()
+	peer := &Peer{
+		ID:                  uint(id64),
+		InterfaceID:         req.InterfaceID,
+		Name:                strings.TrimSpace(req.Name),
+		IP:                  ipStr,
+		AllowedIPs:          allowed,
+		Endpoint:            nullStr(req.Endpoint),
+		PersistentKeepalive: keepalive,
+		PublicKey:           nullStr(req.PublicKey),
+	}
 
-	// 可选：立即把该接口的最新配置下发到内核（热更新）
-	_ = s.ApplyInterfaceConfig(req.InterfaceID)
+	// 6) 提交事务
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 
-	return s.GetPeer(int(id))
+	// 7) （可选）下发到内核：使用 wgctrl
+	// _ = s.applyPeerToKernel(ctx, iface.Name, peer)
+
+	return peer, nil
 }
 
-func (s *WireGuardService) UpdatePeer(id int, req models.UpdatePeerRequest) (*models.WireGuardPeer, error) {
-	_, err := s.db.Exec(`
-		UPDATE wireguard_peers
-		SET name=?, allowed_ips=?, endpoint=?, persistent_keepalive=?, updated_at=CURRENT_TIMESTAMP
-		WHERE id=?`,
-		req.Name, req.AllowedIPs, req.Endpoint, req.PersistentKeepalive, id)
-	if err != nil {
-		return nil, fmt.Errorf("update peer: %w", err)
+func (s *WireGuardService) UpdatePeer(ctx context.Context, id int, req *models.UpdatePeerRequest) (*Peer, error) {
+	// 动态拼 UPDATE
+	set := []string{}
+	args := []any{}
+
+	if req.Name != nil {
+		set = append(set, "name = ?")
+		args = append(args, strings.TrimSpace(*req.Name))
+	}
+	if req.AllowedIPs != nil {
+		set = append(set, "allowed_ips = ?")
+		args = append(args, strings.TrimSpace(*req.AllowedIPs))
+	}
+	if req.Endpoint != nil {
+		set = append(set, "endpoint = ?")
+		args = append(args, nullStr(req.Endpoint))
+	}
+	if req.PersistentKeepalive != nil && *req.PersistentKeepalive > 0 {
+		set = append(set, "persistent_keepalive = ?")
+		args = append(args, *req.PersistentKeepalive)
 	}
 
-	// 找到对应接口，热更新
-	p, _ := s.GetPeer(id)
-	if p != nil {
-		_ = s.ApplyInterfaceConfig(p.InterfaceID)
+	if len(set) == 0 {
+		// 没有要更新的字段，直接返回当前
+		return s.getPeerByID(ctx, id)
 	}
-	return s.GetPeer(id)
+
+	args = append(args, id)
+
+	q := "UPDATE wireguard_peers SET " + strings.Join(set, ", ") + " WHERE id = ?"
+	if _, err := s.db.ExecContext(ctx, q, args...); err != nil {
+		return nil, err
+	}
+	return s.getPeerByID(ctx, id)
+}
+
+func (s *WireGuardService) getPeerByID(ctx context.Context, id int) (*Peer, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, interface_id, name, ip, allowed_ips, endpoint, persistent_keepalive, public_key FROM wireguard_peers WHERE id = ?`, id)
+	var p Peer
+	if err := row.Scan(&p.ID, &p.InterfaceID, &p.Name, &p.IP, &p.AllowedIPs, &p.Endpoint, &p.PersistentKeepalive, &p.PublicKey); err != nil {
+		return nil, err
+	}
+	return &p, nil
 }
 
 func (s *WireGuardService) DeletePeer(id int) error {
