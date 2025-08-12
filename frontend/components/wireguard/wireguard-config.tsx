@@ -1,261 +1,414 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { InterfaceManager } from "@/components/wireguard/interface-manager"
-import { PeerManager } from "@/components/wireguard/peer-manager"
-import { StatusMonitor } from "@/components/wireguard/status-monitor"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { Loader2, Shield, Users, Network } from "lucide-react"
+import { Settings, Download, Save, RefreshCw, Info } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { LoadingState } from "@/components/common/loading-state"
-import { wireguardApi } from "@/lib/api"
+import { statusApi } from "@/lib/api"
 
-interface WireGuardInterface {
-  id: string
-  name: string
-  status: string
-  listen_port: number
-  address: string
-  public_key: string
-  peers_count: number
-}
-
-interface WireGuardPeer {
-  id: string
-  interface_id: string
-  name: string
-  allowed_ips: string
-  endpoint: string
-  persistent_keepalive: number
-  status: string
-  last_handshake: string
-  bytes_received: number
-  bytes_sent: number
-}
-
-interface SystemStatus {
-  wireguard: {
-    version: string
-    status: string
-    interfaces: number
-    active_peers: number
-    total_peers: number
+interface WireGuardConfig {
+  server_config: {
+    listen_port: number
+    private_key: string
+    public_key: string
+    address: string
+    dns: string
+    mtu: number
   }
-  system: {
-    uptime: string
-    cpu_usage: number
-    memory_usage: number
-    disk_usage: number
-  }
-  network: {
-    bytes_received: number
-    bytes_sent: number
-    packets_received: number
-    packets_sent: number
+  global_settings: {
+    auto_start: boolean
+    log_level: string
+    max_peers: number
+    keepalive_interval: number
   }
 }
 
 export function WireguardConfig() {
-  const [interfaces, setInterfaces] = useState<WireGuardInterface[]>([])
-  const [peers, setPeers] = useState<WireGuardPeer[]>([])
-  const [status, setStatus] = useState<SystemStatus | null>(null)
+  const [config, setConfig] = useState<WireGuardConfig | null>(null)
   const [loading, setLoading] = useState(true)
-  const [activeTab, setActiveTab] = useState("overview")
+  const [saving, setSaving] = useState(false)
   const { toast } = useToast()
-  const wgStatus = status?.wireguard?.status ?? "unknown"
-  const isRunning = wgStatus === "running"
-  const cpuUsage = status?.system?.cpu_usage ?? 0
-  const wgVersion = status?.wireguard?.version ?? "未知"
 
-  const loadData = async () => {
+  const loadConfig = async () => {
     try {
-      setLoading(true);
+      setLoading(true)
+      const response = await statusApi.getStatus()
+      console.log("Loaded config:", response)
 
-      // 1) 先拿接口列表
-      const interfacesRes = await wireguardApi.getInterfaces();
-      if (!interfacesRes.success) throw new Error(interfacesRes.message || "Failed to load interfaces");
-      const interfacesData = interfacesRes.data;
-      setInterfaces(interfacesData);
-
-      // 2) 选一个接口 id（比如第一个）。注意把 number 转成 string
-      const firstId = interfacesData[0]?.id ? String(interfacesData[0].id) : undefined;
-
-      // 3) 再并发拿 peers 和 对应接口的 status（允许没有接口时优雅降级）
-      const [peersRes, statusRes] = await Promise.all([
-        wireguardApi.getPeers(),
-        firstId ? wireguardApi.getServerStatus(firstId) : Promise.resolve({ success: true, data: null }),
-      ]);
-
-      if (!peersRes.success) throw new Error(peersRes.message || "Failed to load peers");
-      setPeers(peersRes.data);
-
-      if (statusRes && statusRes.success) {
-        setStatus(statusRes.data); // 可能是 null（当没有接口时）
+      if (response.success) {
+        setConfig(response.config)
       }
     } catch (error) {
-      console.error("Failed to load data:", error);
+      console.error("Failed to load config:", error)
       toast({
         title: "错误",
-        description: `无法加载 WireGuard 配置: ${error instanceof Error ? error.message : String(error)}`,
+        description: "无法加载配置信息",
         variant: "destructive",
-      });
+      })
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
-  };
+  }
 
   useEffect(() => {
-    loadData()
+    loadConfig()
+    
   }, [])
 
-  const handleDataChange = () => {
-    loadData()
+  const handleSave = async () => {
+    try {
+      setSaving(true)
+      // Mock save operation using statusApi
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+
+      toast({
+        title: "成功",
+        description: "配置已保存并应用",
+      })
+    } catch (error) {
+      toast({
+        title: "错误",
+        description: "保存配置失败",
+        variant: "destructive",
+      })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleExport = () => {
+    if (!config) return
+
+    const configText = `[Interface]
+PrivateKey = ${config.server_config.private_key}
+Address = ${config.server_config.address}
+ListenPort = ${config.server_config.listen_port}
+DNS = ${config.server_config.dns}
+MTU = ${config.server_config.mtu}
+
+# Global Settings
+# AutoStart = ${config.global_settings.auto_start}
+# LogLevel = ${config.global_settings.log_level}
+# MaxPeers = ${config.global_settings.max_peers}
+# KeepaliveInterval = ${config.global_settings.keepalive_interval}`
+
+    const blob = new Blob([configText], { type: "text/plain" })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = "wireguard-server.conf"
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   if (loading) {
-    return <LoadingState message="正在加载 WireGuard 配置..." />
+    return <LoadingState message="正在加载系统配置..." />
+  }
+
+  if (!config) {
+    return (
+      <div className="text-center py-12 text-muted-foreground">
+        <Settings className="mx-auto h-12 w-12 mb-4" />
+        <h3 className="text-lg font-medium mb-2">无法加载系统配置</h3>
+        <p className="mb-4">请检查 WireGuard 服务状态。</p>
+        <Button onClick={loadConfig} variant="outline">
+          <RefreshCw className="h-4 w-4 mr-2" />
+          重新加载
+        </Button>
+      </div>
+    )
   }
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold">WireGuard 配置</h1>
-        <p className="text-muted-foreground">管理 WireGuard VPN 接口和对等设备连接</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold">高级配置管理</h2>
+          <p className="text-muted-foreground">配置 WireGuard 服务器参数、网络设置和运行策略</p>
+        </div>
+        <div className="flex space-x-2">
+          <Button onClick={handleExport} variant="outline">
+            <Download className="h-4 w-4 mr-2" />
+            导出配置
+          </Button>
+          <Button onClick={handleSave} disabled={saving}>
+            {saving ? <RefreshCw className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
+            保存配置
+          </Button>
+        </div>
       </div>
 
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-        <TabsList>
-          <TabsTrigger value="overview">概览</TabsTrigger>
-          <TabsTrigger value="interfaces">接口管理</TabsTrigger>
-          <TabsTrigger value="peers">对等设备</TabsTrigger>
-          <TabsTrigger value="status">系统状态</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="overview" className="space-y-4">
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">接口总数</CardTitle>
-                <Network className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{interfaces.length}</div>
-                <p className="text-xs text-muted-foreground">
-                  {interfaces.filter((i) => i.status === "running").length} 个运行中
-                </p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">对等设备</CardTitle>
-                <Users className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{peers.length}</div>
-                <p className="text-xs text-muted-foreground">
-                  {peers.filter((p) => p.status === "connected").length} 个已连接
-                </p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">服务状态</CardTitle>
-                <Shield className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center space-x-2">
-                  <Badge variant={isRunning ? "default" : "secondary"}>
-                    {isRunning ? "运行中" : "已停止"}}
-                  </Badge>
-                </div>
-                <p className="text-xs text-muted-foreground mt-1">版本 {wgVersion}</p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">系统负载</CardTitle>
-                <Loader2 className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{cpuUsage}%</div>
-                <p className="text-xs text-muted-foreground">CPU 使用率</p>
-              </CardContent>
-            </Card>
+      <Card className="border-amber-200 bg-amber-50/50">
+        <CardContent className="pt-6">
+          <div className="flex items-start space-x-3">
+            <Info className="h-5 w-5 text-amber-600 mt-0.5" />
+            <div className="space-y-1">
+              <p className="text-sm font-medium text-amber-900">配置与状态的区别</p>
+              <p className="text-sm text-amber-700">
+                "服务状态"页面用于监控当前运行状态和资源使用情况；本页面用于修改服务器配置参数。
+                修改配置后需要保存并重启服务才能生效。
+              </p>
+            </div>
           </div>
+        </CardContent>
+      </Card>
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle>最近接口</CardTitle>
-                <CardDescription>最新的 WireGuard 接口状态</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-2">
-                  {interfaces.slice(0, 3).map((iface) => (
-                    <div key={iface.id} className="flex items-center justify-between">
-                      <div className="flex items-center space-x-2">
-                        <div
-                          className={`w-2 h-2 rounded-full ${
-                            iface.status === "running" ? "bg-green-500" : "bg-gray-400"
-                          }`}
-                        />
-                        <span className="font-medium">{iface.name}</span>
-                      </div>
-                      <Badge variant={iface.status === "running" ? "default" : "secondary"}>
-                        {iface.status === "running" ? "运行中" : "已停止"}
-                      </Badge>
-                    </div>
-                  ))}
-                  {interfaces.length === 0 && <p className="text-sm text-muted-foreground">暂无配置的接口</p>}
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle>活跃对等设备</CardTitle>
-                <CardDescription>当前已连接的对等设备</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-2">
-                  {peers
-                    .filter((p) => p.status === "connected")
-                    .slice(0, 3)
-                    .map((peer) => (
-                      <div key={peer.id} className="flex items-center justify-between">
-                        <div className="flex items-center space-x-2">
-                          <div className="w-2 h-2 rounded-full bg-green-500" />
-                          <span className="font-medium">{peer.name}</span>
-                        </div>
-                        <span className="text-sm text-muted-foreground">{peer.allowed_ips}</span>
-                      </div>
-                    ))}
-                  {peers.filter((p) => p.status === "connected").length === 0 && (
-                    <p className="text-sm text-muted-foreground">暂无活跃的对等设备</p>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
+      {/* Added configuration explanation card to enhance user understanding */}
+      <Card className="border-blue-200 bg-blue-50/50">
+        <CardContent className="pt-6">
+          <div className="flex items-start space-x-3">
+            <Info className="h-5 w-5 text-blue-600 mt-0.5" />
+            <div className="space-y-1">
+              <p className="text-sm font-medium text-blue-900">配置说明</p>
+              <p className="text-sm text-blue-700">
+                修改配置后需要保存并重启服务才能生效。建议在修改前先导出当前配置作为备份。
+              </p>
+            </div>
           </div>
-        </TabsContent>
+        </CardContent>
+      </Card>
 
-        <TabsContent value="interfaces">
-          <InterfaceManager interfaces={interfaces} onInterfacesChange={handleDataChange} />
-        </TabsContent>
+      <div className="grid gap-6 md:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>服务器网络配置</CardTitle>
+            <CardDescription>WireGuard 服务器的基本网络参数设置</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="listen-port">监听端口</Label>
+                <Input
+                  id="listen-port"
+                  type="number"
+                  value={config.server_config.listen_port}
+                  onChange={(e) =>
+                    setConfig((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            server_config: {
+                              ...prev.server_config,
+                              listen_port: Number.parseInt(e.target.value),
+                            },
+                          }
+                        : null,
+                    )
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="mtu">MTU 大小</Label>
+                <Input
+                  id="mtu"
+                  type="number"
+                  value={config.server_config.mtu}
+                  onChange={(e) =>
+                    setConfig((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            server_config: {
+                              ...prev.server_config,
+                              mtu: Number.parseInt(e.target.value),
+                            },
+                          }
+                        : null,
+                    )
+                  }
+                />
+              </div>
+            </div>
 
-        <TabsContent value="peers">
-          <PeerManager
-            interfaces={interfaces.map((i) => ({ id: i.id, name: i.name, public_key: i.public_key }))}
-            onPeersChange={handleDataChange}
-          />
-        </TabsContent>
+            <div className="space-y-2">
+              <Label htmlFor="address">服务器地址</Label>
+              <Input
+                id="address"
+                value={config.server_config.address}
+                onChange={(e) =>
+                  setConfig((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          server_config: {
+                            ...prev.server_config,
+                            address: e.target.value,
+                          },
+                        }
+                      : null,
+                  )
+                }
+              />
+            </div>
 
-        <TabsContent value="status">
-          <StatusMonitor status={status} />
-        </TabsContent>
-      </Tabs>
+            <div className="space-y-2">
+              <Label htmlFor="dns">DNS 服务器</Label>
+              <Input
+                id="dns"
+                value={config.server_config.dns}
+                onChange={(e) =>
+                  setConfig((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          server_config: {
+                            ...prev.server_config,
+                            dns: e.target.value,
+                          },
+                        }
+                      : null,
+                  )
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>服务器密钥</Label>
+              <div className="flex items-center space-x-2">
+                <Badge variant="secondary">私钥已配置</Badge>
+                <Badge variant="secondary">公钥已生成</Badge>
+              </div>
+              <p className="text-xs text-muted-foreground">出于安全考虑，密钥信息已隐藏</p>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>服务运行参数</CardTitle>
+            <CardDescription>WireGuard 服务的性能和行为配置</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="max-peers">最大客户端数</Label>
+                <Input
+                  id="max-peers"
+                  type="number"
+                  value={config.global_settings.max_peers}
+                  onChange={(e) =>
+                    setConfig((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            global_settings: {
+                              ...prev.global_settings,
+                              max_peers: Number.parseInt(e.target.value),
+                            },
+                          }
+                        : null,
+                    )
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="keepalive">保活间隔 (秒)</Label>
+                <Input
+                  id="keepalive"
+                  type="number"
+                  value={config.global_settings.keepalive_interval}
+                  onChange={(e) =>
+                    setConfig((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            global_settings: {
+                              ...prev.global_settings,
+                              keepalive_interval: Number.parseInt(e.target.value),
+                            },
+                          }
+                        : null,
+                    )
+                  }
+                />
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="log-level">日志级别</Label>
+              <select
+                id="log-level"
+                className="w-full px-3 py-2 border border-input bg-background rounded-md"
+                value={config.global_settings.log_level}
+                onChange={(e) =>
+                  setConfig((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          global_settings: {
+                            ...prev.global_settings,
+                            log_level: e.target.value,
+                          },
+                        }
+                      : null,
+                  )
+                }
+              >
+                <option value="debug">调试 (Debug)</option>
+                <option value="info">信息 (Info)</option>
+                <option value="warn">警告 (Warning)</option>
+                <option value="error">错误 (Error)</option>
+              </select>
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <input
+                type="checkbox"
+                id="auto-start"
+                checked={config.global_settings.auto_start}
+                onChange={(e) =>
+                  setConfig((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          global_settings: {
+                            ...prev.global_settings,
+                            auto_start: e.target.checked,
+                          },
+                        }
+                      : null,
+                  )
+                }
+                className="rounded border-input"
+              />
+              <Label htmlFor="auto-start">系统启动时自动启动服务</Label>
+            </div>
+
+            {/* Optimized status explanation for clearer service status description */}
+            <div className="pt-4 border-t">
+              <h4 className="font-medium mb-2">服务状态说明</h4>
+              <div className="space-y-1 text-sm text-muted-foreground">
+                <p>
+                  •{" "}
+                  <Badge variant="default" className="mr-1">
+                    运行中
+                  </Badge>{" "}
+                  - 服务正常运行，可接受客户端连接
+                </p>
+                <p>
+                  •{" "}
+                  <Badge variant="secondary" className="mr-1">
+                    已停止
+                  </Badge>{" "}
+                  - 服务未启动，无法建立连接
+                </p>
+                <p>
+                  •{" "}
+                  <Badge variant="destructive" className="mr-1">
+                    配置错误
+                  </Badge>{" "}
+                  - 配置文件有误或端口冲突
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   )
 }

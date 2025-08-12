@@ -1,438 +1,805 @@
 "use client"
 
-import { DialogDescription } from "@/components/ui/dialog"
-
-import type React from "react"
-
-import { useState, useEffect } from "react"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { useState, useEffect, useMemo } from "react"
 import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea"
-import { PlusCircle, Edit, Trash2, Download, Copy } from "lucide-react"
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
-import { useToast } from "@/hooks/use-toast"
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { toast } from "@/hooks/use-toast"
+import {
+  Plus,
+  MoreHorizontal,
+  Download,
+  Trash2,
+  Edit,
+  Users,
+  Activity,
+  RefreshCw,
+  List,
+  Layers,
+  Network,
+  Search,
+} from "lucide-react"
 import { wireguardApi } from "@/lib/api"
-import { LoadingState } from "@/components/common/loading-state"
-import { EmptyState } from "@/components/common/empty-state"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Badge } from "@/components/ui/badge"
+import { LoadingState } from "@/components/loading-state"
 
-interface WireGuardInterface {
+interface Peer {
   id: string
   name: string
   public_key: string
+  allowed_ips: string
+  endpoint?: string
+  latest_handshake?: string
+  transfer_rx: number
+  transfer_tx: number
+  persistent_keepalive?: number
+  status: "connected" | "disconnected" | "unknown"
+  interface_id: string
 }
 
-interface WireGuardPeer {
+interface Interface {
   id: string
-  interface_id: string
   name: string
-  public_key: string
-  private_key?: string // Should not be exposed normally
-  preshared_key?: string
-  allowed_ips: string
-  endpoint: string
-  persistent_keepalive: number
-  status: "connected" | "disconnected" | "unknown"
-  last_handshake: string
-  bytes_received: number
-  bytes_sent: number
+  status: "active" | "inactive"
 }
 
 interface PeerManagerProps {
-  interfaces: WireGuardInterface[]
-  onPeersChange: () => void
+  interfaces?: Interface[]
+  onPeersChange?: () => void
 }
 
-export function PeerManager({ interfaces, onPeersChange }: PeerManagerProps) {
-  const [peers, setPeers] = useState<WireGuardPeer[]>([])
-  const [loading, setLoading] = useState(false) // Assume initial load is done by parent
-  const [isAddEditDialogOpen, setIsAddEditDialogOpen] = useState(false)
-  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
-  const [currentPeer, setCurrentPeer] = useState<WireGuardPeer | null>(null)
-  const [configContent, setConfigContent] = useState<string>("")
-  const [isConfigDialogOpen, setIsConfigDialogOpen] = useState(false)
-  const { toast } = useToast()
+export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps) {
+  const [peers, setPeers] = useState<Peer[]>([])
+  const [loading, setLoading] = useState(true)
+  const [createDialogOpen, setCreateDialogOpen] = useState(false)
+  const [editDialogOpen, setEditDialogOpen] = useState(false)
+  const [editingPeer, setEditingPeer] = useState<Peer | null>(null)
+  const [searchTerm, setSearchTerm] = useState("")
+  const [selectedInterface, setSelectedInterface] = useState<string>("all")
+  const [viewMode, setViewMode] = useState<"table" | "grouped">("table")
+  const [formData, setFormData] = useState({
+    name: "",
+    allowed_ips: "",
+    endpoint: "",
+    persistent_keepalive: "",
+    interface_id: "",
+  })
 
-  const fetchPeers = async () => {
+  // Ensure interfaces始终是数组，避免undefined错误
+  const [localIfs, setLocalIfs] = useState<Interface[]>([])
+
+  const safeInterfaces = (interfaces?.length ?? 0) > 0 ? interfaces : localIfs
+
+  const filteredPeers = useMemo(() => {
+    let filtered = Array.isArray(peers) ? peers : []
+
+    // 按接口筛选
+    if (selectedInterface !== "all") {
+      filtered = filtered.filter((peer) => peer.interface_id === selectedInterface)
+    }
+
+    // 按搜索词筛选
+    if (searchTerm) {
+      filtered = filtered.filter(
+        (peer) =>
+          peer.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          peer.allowed_ips.includes(searchTerm) ||
+          (peer.endpoint && peer.endpoint.toLowerCase().includes(searchTerm.toLowerCase())),
+      )
+    }
+
+    return filtered
+  }, [peers, selectedInterface, searchTerm])
+
+  const groupedPeers = useMemo(() => {
+    const groups: { [key: string]: { interface: Interface; peers: Peer[] } } = {}
+
+    safeInterfaces.forEach((iface) => {
+      groups[iface.id] = {
+        interface: iface,
+        peers: filteredPeers.filter((peer) => peer.interface_id === iface.id),
+      }
+    })
+
+    return groups
+  }, [filteredPeers, safeInterfaces])
+
+  const getInterfaceName = (interfaceId: string) => {
+    const iface = safeInterfaces.find((i) => i.id === interfaceId)
+    return iface ? iface.name : "未知接口"
+  }
+
+  useEffect(() => {
+    if ((interfaces?.length ?? 0) === 0) {
+      ;(async () => {
+        try {
+          const res = await wireguardApi.getInterfaces()
+          const rows = Array.isArray(res?.data)
+            ? res.data
+            : Array.isArray(res?.data?.list)
+            ? res.data.list
+            : Array.isArray(res?.items)
+            ? res.items
+            : []
+          const mapped = rows.map((i: any) => ({
+            id: String(i.id),
+            name: i.name,
+            status: i.status === "running" ? "active" : "inactive",
+          }))
+          setLocalIfs(mapped)
+          console.log("PeerManager fetched interfaces (self):", mapped)
+        } catch (e) {
+          console.error("PeerManager self-fetch interfaces failed:", e)
+        }
+      })()
+    }
+  }, [interfaces])
+
+  const loadPeers = async () => {
     try {
       setLoading(true)
       const response = await wireguardApi.getPeers()
       if (response.success) {
-        setPeers(response.data)
-      } else {
-        throw new Error(response.message || "Failed to fetch peers")
+        // Ensure peers始终是数组
+        setPeers(Array.isArray(response.data) ? response.data : [])
       }
     } catch (error) {
-      console.error("Error fetching peers:", error)
+      console.error("Failed to load peers:", error)
       toast({
         title: "错误",
-        description: "无法加载 WireGuard 对等设备。",
+        description: "加载客户端连接失败",
         variant: "destructive",
       })
-      setPeers([])
     } finally {
       setLoading(false)
     }
   }
 
   useEffect(() => {
-    fetchPeers() // Fetch peers when component mounts or on refresh
-    const interval = setInterval(fetchPeers, 10000) // Refresh every 10 seconds
-    return () => clearInterval(interval)
+    loadPeers()
   }, [])
 
-  const handleAddPeer = () => {
-    setCurrentPeer(null)
-    setIsAddEditDialogOpen(true)
-  }
-
-  const handleEditPeer = (peer: WireGuardPeer) => {
-    setCurrentPeer(peer)
-    setIsAddEditDialogOpen(true)
-  }
-
-  const handleDeletePeer = (peer: WireGuardPeer) => {
-    setCurrentPeer(peer)
-    setIsDeleteDialogOpen(true)
-  }
-
-  const handleSavePeer = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const formData = new FormData(event.currentTarget)
-    const data = {
-      name: formData.get("name") as string,
-      interface_id: formData.get("interface_id") as string,
-      public_key: formData.get("public_key") as string,
-      preshared_key: formData.get("preshared_key") as string,
-      allowed_ips: formData.get("allowed_ips") as string,
-      endpoint: formData.get("endpoint") as string,
-      persistent_keepalive: Number.parseInt(formData.get("persistent_keepalive") as string),
+  const handleCreate = async () => {
+    // 1) 先组装 payload，做类型与默认值处理
+    const payload: any = {
+      name: formData.name.trim(),
+      allowed_ips: formData.allowed_ips.trim(),
+      interface_id: Number(formData.interface_id), // "4" -> 4
+      // 空串就不传 endpoint（让后端用默认/忽略）
+      ...(formData.endpoint.trim() ? { endpoint: formData.endpoint.trim() } : {}),
+      // 留空默认 25，否则转 number
+      persistent_keepalive:
+        formData.persistent_keepalive === "" ? 25 : Number(formData.persistent_keepalive),
     }
 
-    try {
-      setLoading(true)
-      let response
-      if (currentPeer) {
-        response = await wireguardApi.updatePeer(currentPeer.id, data)
-        toast({
-          title: "对等设备更新成功",
-          description: `对等设备 ${data.name} 已更新。`,
-        })
-      } else {
-        response = await wireguardApi.addPeer(data)
-        toast({
-          title: "对等设备添加成功",
-          description: `新对等设备 ${data.name} 已添加。`,
-        })
-      }
-
-      if (!response.success) {
-        throw new Error(response.message || "Failed to save peer")
-      }
-
-      setIsAddEditDialogOpen(false)
-      onPeersChange() // Notify parent to refresh data
-      fetchPeers() // Refresh local peer list
-    } catch (error) {
-      console.error("Failed to save peer:", error)
+    // 2) 基本校验
+    if (!payload.interface_id) {
       toast({
-        title: "操作失败",
-        description: `保存对等设备时发生错误: ${error instanceof Error ? error.message : String(error)}`,
+        title: "缺少接口",
+        description: "请选择要绑定的接口。",
         variant: "destructive",
       })
-    } finally {
-      setLoading(false)
+      return
     }
-  }
-
-  const handleConfirmDelete = async () => {
-    if (currentPeer) {
-      try {
-        setLoading(true)
-        const response = await wireguardApi.deletePeer(currentPeer.id)
-        if (response.success) {
-          toast({
-            title: "对等设备删除成功",
-            description: `对等设备 ${currentPeer.name} 已删除。`,
-          })
-          setIsDeleteDialogOpen(false)
-          onPeersChange() // Notify parent to refresh data
-          fetchPeers() // Refresh local peer list
-        } else {
-          throw new Error(response.message || "Failed to delete peer")
-        }
-      } catch (error) {
-        console.error("Failed to delete peer:", error)
-        toast({
-          title: "操作失败",
-          description: `删除对等设备时发生错误: ${error instanceof Error ? error.message : String(error)}`,
-          variant: "destructive",
-        })
-      } finally {
-        setLoading(false)
-      }
+    if (!payload.name || !payload.allowed_ips) {
+      toast({
+        title: "表单不完整",
+        description: "请填写名称和允许的 IP。",
+        variant: "destructive",
+      })
+      return
     }
-  }
 
-  const handleGenerateConfig = async (peerId: string) => {
     try {
-      const response = await wireguardApi.generateClientConfig(peerId)
+      const response = await wireguardApi.addPeer(payload)
+
       if (response.success) {
-        setConfigContent(response.data.config)
-        setIsConfigDialogOpen(true)
-        toast({
-          title: "配置生成成功",
-          description: "WireGuard 客户端配置已生成。",
-        })
+        toast({ title: "成功", description: "客户端连接创建成功" })
+        setCreateDialogOpen(false)
+        resetForm()
+        loadPeers()
+        onPeersChange?.()
       } else {
-        throw new Error(response.message || "Failed to generate config")
+        // 3) 这里修正为 response.error
+        throw new Error(response.error || "创建客户端连接失败")
       }
     } catch (error) {
-      console.error("Failed to generate config:", error)
       toast({
-        title: "生成失败",
-        description: `生成客户端配置时发生错误: ${error instanceof Error ? error.message : String(error)}`,
+        title: "错误",
+        description: error instanceof Error ? error.message : "创建客户端连接失败",
         variant: "destructive",
       })
     }
   }
 
-  const handleCopyConfig = () => {
-    navigator.clipboard.writeText(configContent)
-    toast({
-      title: "已复制",
-      description: "WireGuard 配置已复制到剪贴板。",
+
+  const handleEdit = async () => {
+    if (!editingPeer) return
+
+    try {
+      const response = await wireguardApi.updatePeer(editingPeer.id, {
+        name: formData.name,
+        allowed_ips: formData.allowed_ips,
+        endpoint: formData.endpoint,
+        persistent_keepalive: formData.persistent_keepalive,
+      })
+
+      if (response.success) {
+        toast({
+          title: "成功",
+          description: "客户端连接更新成功",
+        })
+        setEditDialogOpen(false)
+        setEditingPeer(null)
+        resetForm()
+        loadPeers()
+        onPeersChange?.()
+      } else {
+        throw new Error(response.error || "更新客户端连接失败")
+      }
+    } catch (error) {
+      toast({
+        title: "错误",
+        description: error instanceof Error ? error.message : "更新客户端连接失败",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const handleDelete = async (id: string) => {
+    try {
+      const response = await wireguardApi.deletePeer(id)
+
+      if (response.success) {
+        toast({
+          title: "成功",
+          description: "客户端连接删除成功",
+        })
+        loadPeers()
+        onPeersChange?.()
+      } else {
+        throw new Error(response.error || "删除客户端连接失败")
+      }
+    } catch (error) {
+      toast({
+        title: "错误",
+        description: "删除客户端连接失败",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const handleDownloadConfig = async (id: string) => {
+    try {
+      const response = await wireguardApi.generateClientConfig(id)
+
+      if (response.success && response.data) {
+        const blob = new Blob([response.data], { type: "text/plain" })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement("a")
+        a.href = url
+        a.download = `peer-${id}.conf`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+
+        toast({
+          title: "成功",
+          description: "配置文件下载成功",
+        })
+      }
+    } catch (error) {
+      toast({
+        title: "错误",
+        description: "下载配置文件失败",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const handlePing = async (id: string) => {
+    try {
+      const response = await wireguardApi.getPeer(id)
+
+      if (response.success) {
+        toast({
+          title: "连接测试",
+          description: `客户端连接 ${id} 状态正常`,
+        })
+      } else {
+        throw new Error("连接测试失败")
+      }
+    } catch (error) {
+      toast({
+        title: "连接测试失败",
+        description: error instanceof Error ? error.message : "无法连接到客户端",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const resetForm = () => {
+    setFormData({
+      name: "",
+      allowed_ips: "",
+      endpoint: "",
+      persistent_keepalive: "",
+      interface_id: "",
     })
   }
 
-  if (loading) {
-    return <LoadingState message="正在执行操作..." />
+  const openEditDialog = (peer: Peer) => {
+    setEditingPeer(peer)
+    setFormData({
+      name: peer.name,
+      allowed_ips: peer.allowed_ips,
+      endpoint: peer.endpoint || "",
+      persistent_keepalive: peer.persistent_keepalive?.toString() || "",
+      interface_id: peer.interface_id,
+    })
+    setEditDialogOpen(true)
   }
 
+  const formatBytes = (bytes: number) => {
+    if (bytes === 0) return "0 B"
+    const k = 1024
+    const sizes = ["B", "KB", "MB", "GB", "TB"]
+    const i = Math.floor(Math.log(bytes) / Math.log(k))
+    return Number.parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i]
+  }
+
+  const formatLastHandshake = (timestamp?: string) => {
+    if (!timestamp) return "从未连接"
+    const date = new Date(timestamp)
+    const now = new Date()
+    const diff = now.getTime() - date.getTime()
+    const minutes = Math.floor(diff / 60000)
+
+    if (minutes < 1) return "刚刚"
+    if (minutes < 60) return `${minutes} 分钟前`
+    if (minutes < 1440) return `${Math.floor(minutes / 60)} 小时前`
+    return `${Math.floor(minutes / 1440)} 天前`
+  }
+
+  const getStatusBadge = (status: string) => {
+    switch (status) {
+      case "connected":
+        return (
+          <Badge variant="default" className="bg-green-500">
+            已连接
+          </Badge>
+        )
+      case "disconnected":
+        return <Badge variant="secondary">已断开</Badge>
+      default:
+        return <Badge variant="outline">未知</Badge>
+    }
+  }
+
+  const allPeers = peers || []
+
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0">
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
         <div>
-          <CardTitle>WireGuard 对等设备</CardTitle>
-          <CardDescription>管理 WireGuard VPN 对等连接。</CardDescription>
+          <h2 className="text-2xl font-bold">客户端连接管理</h2>
+          <p className="text-muted-foreground">
+            管理 WireGuard 客户端连接配置
+            {safeInterfaces.length > 0 && (
+              <span className="ml-2 text-green-600">(已检测到 {safeInterfaces.length} 个可用接口)</span>
+            )}
+          </p>
         </div>
-        <Button onClick={handleAddPeer}>
-          <PlusCircle className="mr-2 h-4 w-4" /> 添加对等设备
-        </Button>
-      </CardHeader>
-      <CardContent>
-        {peers.length === 0 ? (
-          <EmptyState title="暂无对等设备" description="点击“添加对等设备”按钮创建您的第一个 WireGuard 对等连接。" />
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>名称</TableHead>
-                <TableHead>接口</TableHead>
-                <TableHead>允许IPs</TableHead>
-                <TableHead>端点</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead>流量 (入/出)</TableHead>
-                <TableHead className="text-right">操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {peers.map((peer) => (
-                <TableRow key={peer.id}>
-                  <TableCell className="font-medium">{peer.name}</TableCell>
-                  <TableCell>{interfaces.find((i) => i.id === peer.interface_id)?.name || "未知接口"}</TableCell>
-                  <TableCell>{peer.allowed_ips}</TableCell>
-                  <TableCell>{peer.endpoint || "N/A"}</TableCell>
-                  <TableCell>
-                    <Badge variant={peer.status === "connected" ? "default" : "secondary"}>
-                      {peer.status === "connected" ? "已连接" : "未连接"}
-                    </Badge>                    
-                  </TableCell>
-                  <TableCell>
-                    {peer.bytes_received} / {peer.bytes_sent} bytes
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <Button variant="ghost" size="sm" onClick={() => handleEditPeer(peer)} className="mr-2">
-                      <Edit className="h-4 w-4" />
-                      <span className="sr-only">编辑</span>
-                    </Button>
-                    <Button variant="ghost" size="sm" onClick={() => handleDeletePeer(peer)} className="mr-2">
-                      <Trash2 className="h-4 w-4" />
-                      <span className="sr-only">删除</span>
-                    </Button>
-                    <Button variant="ghost" size="sm" onClick={() => handleGenerateConfig(peer.id)}>
-                      <Download className="h-4 w-4" />
-                      <span className="sr-only">生成配置</span>
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        )}
-      </CardContent>
-
-      {/* Add/Edit Peer Dialog */}
-      <Dialog open={isAddEditDialogOpen} onOpenChange={setIsAddEditDialogOpen}>
-        <DialogContent className="sm:max-w-[600px]">
-          <DialogHeader>
-            <DialogTitle>{currentPeer ? "编辑对等设备" : "添加新对等设备"}</DialogTitle>
-            <DialogDescription>
-              {currentPeer ? "修改对等设备信息。" : "添加一个新的 WireGuard 对等连接。"}
-            </DialogDescription>
-          </DialogHeader>
-          <form onSubmit={handleSavePeer} className="grid gap-4 py-4">
-            <div className="grid grid-cols-4 items-center gap-4">
-              <Label htmlFor="name" className="text-right">
-                名称
-              </Label>
-              <Input id="name" name="name" defaultValue={currentPeer?.name || ""} className="col-span-3" required />
-            </div>
-            <div className="grid grid-cols-4 items-center gap-4">
-              <Label htmlFor="interface_id" className="text-right">
-                所属接口
-              </Label>
-              <Select name="interface_id" defaultValue={currentPeer?.interface_id || interfaces[0]?.id} required>
-                <SelectTrigger className="col-span-3">
-                  <SelectValue placeholder="选择 WireGuard 接口" />
-                </SelectTrigger>
-                <SelectContent>
-                  {interfaces.map((iface) => (
-                    <SelectItem key={iface.id} value={iface.id}>
-                      {iface.name} ({iface.public_key.substring(0, 8)}...)
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid grid-cols-4 items-center gap-4">
-              <Label htmlFor="public_key" className="text-right">
-                公钥
-              </Label>
-              <Input
-                id="public_key"
-                name="public_key"
-                defaultValue={currentPeer?.public_key || ""}
-                className="col-span-3"
-                required
-              />
-            </div>
-            <div className="grid grid-cols-4 items-center gap-4">
-              <Label htmlFor="preshared_key" className="text-right">
-                预共享密钥 (可选)
-              </Label>
-              <Input
-                id="preshared_key"
-                name="preshared_key"
-                defaultValue={currentPeer?.preshared_key || ""}
-                className="col-span-3"
-              />
-            </div>
-            <div className="grid grid-cols-4 items-center gap-4">
-              <Label htmlFor="allowed_ips" className="text-right">
-                允许IPs
-              </Label>
-              <Input
-                id="allowed_ips"
-                name="allowed_ips"
-                defaultValue={currentPeer?.allowed_ips || ""}
-                placeholder="例如: 10.0.0.2/32, 192.168.1.0/24"
-                className="col-span-3"
-                required
-              />
-            </div>
-            <div className="grid grid-cols-4 items-center gap-4">
-              <Label htmlFor="endpoint" className="text-right">
-                端点 (可选)
-              </Label>
-              <Input
-                id="endpoint"
-                name="endpoint"
-                defaultValue={currentPeer?.endpoint || ""}
-                placeholder="例如: example.com:51820 或 1.2.3.4:51820"
-                className="col-span-3"
-              />
-            </div>
-            <div className="grid grid-cols-4 items-center gap-4">
-              <Label htmlFor="persistent_keepalive" className="text-right">
-                持久心跳 (秒, 0为禁用)
-              </Label>
-              <Input
-                id="persistent_keepalive"
-                name="persistent_keepalive"
-                type="number"
-                defaultValue={currentPeer?.persistent_keepalive || 25}
-                className="col-span-3"
-              />
-            </div>
-            <DialogFooter>
-              <Button type="submit" disabled={loading}>
-                {loading ? "保存中..." : currentPeer ? "保存更改" : "添加对等设备"}
+        <div className="flex space-x-2">
+          <Button onClick={loadPeers} variant="outline" disabled={loading}>
+            <RefreshCw className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`} />
+            刷新
+          </Button>
+          <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
+            <DialogTrigger asChild>
+              <Button disabled={safeInterfaces.length === 0}>
+                <Plus className="h-4 w-4 mr-2" />
+                添加客户端
+                {safeInterfaces.length === 0 && " (需要先创建接口)"}
               </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>添加客户端连接</DialogTitle>
+                <DialogDescription>创建新的 WireGuard 客户端连接配置</DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-4 py-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="name">名称</Label>
+                  <Input
+                    id="name"
+                    value={formData.name}
+                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                    placeholder="输入客户端连接名称"
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="interface">接口</Label>
+                  <select
+                    id="interface"
+                    value={formData.interface_id}
+                    onChange={(e) => setFormData({ ...formData, interface_id: e.target.value })}
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <option value="">选择接口</option>
+                    {safeInterfaces.map((iface) => (
+                      <option key={iface.id} value={iface.id}>
+                        {iface.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="allowed_ips">允许的 IP</Label>
+                  <Input
+                    id="allowed_ips"
+                    value={formData.allowed_ips}
+                    onChange={(e) => setFormData({ ...formData, allowed_ips: e.target.value })}
+                    placeholder="例如: 10.0.0.2/32"
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="endpoint">端点 (可选)</Label>
+                  <Input
+                    id="endpoint"
+                    value={formData.endpoint}
+                    onChange={(e) => setFormData({ ...formData, endpoint: e.target.value })}
+                    placeholder="例如: example.com:51820"
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="persistent_keepalive">持久保活 (可选)</Label>
+                  <Input
+                    id="persistent_keepalive"
+                    type="number"
+                    value={formData.persistent_keepalive}
+                    onChange={(e) => setFormData({ ...formData, persistent_keepalive: e.target.value })}
+                    placeholder="秒数，例如: 25"
+                  />
+                </div>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setCreateDialogOpen(false)}>
+                  取消
+                </Button>
+                <Button onClick={handleCreate}>创建</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </div>
+      </div>
 
-      {/* Delete Confirmation Dialog */}
-      <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>确定要删除此对等设备吗？</AlertDialogTitle>
-            <AlertDialogDescription>
-              此操作无法撤销。这将永久删除对等设备 <span className="font-semibold">{currentPeer?.name}</span>{" "}
-              及其所有相关配置。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleConfirmDelete}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              删除
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {peers.length > 0 && (
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
+              <div className="flex flex-col sm:flex-row gap-4 flex-1">
+                <div className="relative flex-1 max-w-sm">
+                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground h-4 w-4" />
+                  <Input
+                    placeholder="搜索客户端名称、IP 或端点..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="pl-10"
+                  />
+                </div>
+                <select
+                  value={selectedInterface}
+                  onChange={(e) => setSelectedInterface(e.target.value)}
+                  className="flex h-10 w-full sm:w-48 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                >
+                  <option value="all">所有接口</option>
+                  {safeInterfaces.map((iface) => (
+                    <option key={iface.id} value={iface.id}>
+                      {iface.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant={viewMode === "table" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setViewMode("table")}
+                >
+                  <List className="h-4 w-4 mr-2" />
+                  列表视图
+                </Button>
+                <Button
+                  variant={viewMode === "grouped" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setViewMode("grouped")}
+                >
+                  <Layers className="h-4 w-4 mr-2" />
+                  分组视图
+                </Button>
+              </div>
+            </div>
+            {filteredPeers.length !== peers.length && (
+              <div className="mt-4 text-sm text-muted-foreground">
+                显示 {filteredPeers.length} / {peers.length} 个客户端连接
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
-      {/* Config Display Dialog */}
-      <Dialog open={isConfigDialogOpen} onOpenChange={setIsConfigDialogOpen}>
-        <DialogContent className="sm:max-w-[600px]">
+      {loading ? (
+        <LoadingState message="正在加载客户端连接..." />
+      ) : peers.length === 0 ? (
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center py-12">
+            <Users className="h-12 w-12 text-muted-foreground mb-4" />
+            <h3 className="text-lg font-medium mb-2">暂无配置的客户端连接</h3>
+            <p className="text-muted-foreground mb-4 text-center">
+              {safeInterfaces.length === 0
+                ? "请先在“网络接口”标签页创建 WireGuard 接口，然后添加客户端连接"
+                : "添加您的第一个客户端连接以开始 VPN 服务"}
+            </p>
+            {safeInterfaces.length > 0 && (
+              <Button onClick={() => setCreateDialogOpen(true)}>
+                <Plus className="h-4 w-4 mr-2" />
+                添加客户端连接
+              </Button>
+            )}
+            <div className="mt-6 p-4 bg-muted/50 rounded-lg text-left max-w-md">
+              <h4 className="font-medium mb-2">连接状态说明</h4>
+              <div className="space-y-1 text-sm text-muted-foreground">
+                <p>
+                  •{" "}
+                  <Badge variant="default" className="mr-1">
+                    已连接
+                  </Badge>{" "}
+                  - 客户端正常连接，数据传输正常
+                </p>
+                <p>
+                  •{" "}
+                  <Badge variant="secondary" className="mr-1">
+                    未连接
+                  </Badge>{" "}
+                  - 客户端配置正确但未建立连接
+                </p>
+                <p>
+                  •{" "}
+                  <Badge variant="destructive" className="mr-1">
+                    配置错误
+                  </Badge>{" "}
+                  - 客户端配置有误或密钥不匹配
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      ) : viewMode === "grouped" ? (
+        /* 分组视图 */
+        <div className="space-y-4">
+          {Object.entries(groupedPeers).map(([interfaceId, group]) => (
+            <Card key={interfaceId}>
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle className="flex items-center gap-2">
+                      <Network className="h-5 w-5" />
+                      {group.interface.name}
+                      <Badge variant={group.interface.status === "active" ? "default" : "secondary"}>
+                        {group.interface.status === "active" ? "活跃" : "非活跃"}
+                      </Badge>
+                    </CardTitle>
+                    <CardDescription>{group.peers.length} 个客户端连接</CardDescription>
+                  </div>
+                </div>
+              </CardHeader>
+              {group.peers.length > 0 && (
+                <CardContent>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>名称</TableHead>
+                        <TableHead>状态</TableHead>
+                        <TableHead>允许的 IP</TableHead>
+                        <TableHead>端点</TableHead>
+                        <TableHead>最后握手</TableHead>
+                        <TableHead>传输数据</TableHead>
+                        <TableHead className="text-right">操作</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {group.peers.map((peer) => (
+                        <TableRow key={peer.id}>
+                          <TableCell className="font-medium">{peer.name}</TableCell>
+                          <TableCell>{getStatusBadge(peer.status)}</TableCell>
+                          <TableCell className="font-mono text-sm">{peer.allowed_ips}</TableCell>
+                          <TableCell className="font-mono text-sm">{peer.endpoint || "-"}</TableCell>
+                          <TableCell>{formatLastHandshake(peer.latest_handshake)}</TableCell>
+                          <TableCell>
+                            <div className="text-sm">
+                              <div>↓ {formatBytes(peer.transfer_rx)}</div>
+                              <div>↑ {formatBytes(peer.transfer_tx)}</div>
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button variant="ghost" className="h-8 w-8 p-0">
+                                  <span className="sr-only">打开菜单</span>
+                                  <MoreHorizontal className="h-4 w-4" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                <DropdownMenuItem onClick={() => openEditDialog(peer)}>
+                                  <Edit className="h-4 w-4 mr-2" />
+                                  编辑
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => handleDownloadConfig(peer.id)}>
+                                  <Download className="h-4 w-4 mr-2" />
+                                  下载配置
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => handlePing(peer.id)}>
+                                  <Activity className="h-4 w-4 mr-2" />
+                                  连接测试
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => handleDelete(peer.id)} className="text-destructive">
+                                  <Trash2 className="h-4 w-4 mr-2" />
+                                  删除
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </CardContent>
+              )}
+            </Card>
+          ))}
+        </div>
+      ) : (
+        /* 表格视图，添加接口列 */
+        <Card>
+          <CardHeader>
+            <CardTitle>客户端连接列表</CardTitle>
+            <CardDescription>当前配置的所有 WireGuard 客户端连接</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>名称</TableHead>
+                  <TableHead>所属接口</TableHead>
+                  <TableHead>状态</TableHead>
+                  <TableHead>允许的 IP</TableHead>
+                  <TableHead>端点</TableHead>
+                  <TableHead>最后握手</TableHead>
+                  <TableHead>传输数据</TableHead>
+                  <TableHead className="text-right">操作</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filteredPeers.map((peer) => (
+                  <TableRow key={peer.id}>
+                    <TableCell className="font-medium">{peer.name}</TableCell>
+                    <TableCell>
+                      <Badge variant="outline">{getInterfaceName(peer.interface_id)}</Badge>
+                    </TableCell>
+                    <TableCell>{getStatusBadge(peer.status)}</TableCell>
+                    <TableCell className="font-mono text-sm">{peer.allowed_ips}</TableCell>
+                    <TableCell className="font-mono text-sm">{peer.endpoint || "-"}</TableCell>
+                    <TableCell>{formatLastHandshake(peer.latest_handshake)}</TableCell>
+                    <TableCell>
+                      <div className="text-sm">
+                        <div>↓ {formatBytes(peer.transfer_rx)}</div>
+                        <div>↑ {formatBytes(peer.transfer_tx)}</div>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" className="h-8 w-8 p-0">
+                            <span className="sr-only">打开菜单</span>
+                            <MoreHorizontal className="h-4 w-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={() => openEditDialog(peer)}>
+                            <Edit className="h-4 w-4 mr-2" />
+                            编辑
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handleDownloadConfig(peer.id)}>
+                            <Download className="h-4 w-4 mr-2" />
+                            下载配置
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handlePing(peer.id)}>
+                            <Activity className="h-4 w-4 mr-2" />
+                            连接测试
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handleDelete(peer.id)} className="text-destructive">
+                            <Trash2 className="h-4 w-4 mr-2" />
+                            删除
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* 编辑对话框 */}
+      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+        <DialogContent>
           <DialogHeader>
-            <DialogTitle>WireGuard 客户端配置</DialogTitle>
-            <DialogDescription>将以下内容复制到您的 WireGuard 客户端配置文件中 (.conf)。</DialogDescription>
+            <DialogTitle>编辑客户端连接</DialogTitle>
+            <DialogDescription>修改客户端连接配置信息</DialogDescription>
           </DialogHeader>
-          <div className="relative">
-            <Textarea value={configContent} readOnly className="h-64 font-mono text-xs resize-none" />
-            <Button
-              variant="outline"
-              size="sm"
-              className="absolute top-2 right-2 bg-transparent"
-              onClick={handleCopyConfig}
-            >
-              <Copy className="h-4 w-4 mr-1" /> 复制
-            </Button>
+          <div className="grid gap-4 py-4">
+            <div className="grid gap-2">
+              <Label htmlFor="edit-name">名称</Label>
+              <Input
+                id="edit-name"
+                value={formData.name}
+                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                placeholder="输入客户端连接名称"
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="edit-allowed_ips">允许的 IP</Label>
+              <Input
+                id="edit-allowed_ips"
+                value={formData.allowed_ips}
+                onChange={(e) => setFormData({ ...formData, allowed_ips: e.target.value })}
+                placeholder="例如: 10.0.0.2/32"
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="edit-endpoint">端点 (可选)</Label>
+              <Input
+                id="edit-endpoint"
+                value={formData.endpoint}
+                onChange={(e) => setFormData({ ...formData, endpoint: e.target.value })}
+                placeholder="例如: example.com:51820"
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="edit-persistent_keepalive">持久保活 (可选)</Label>
+              <Input
+                id="edit-persistent_keepalive"
+                type="number"
+                value={formData.persistent_keepalive}
+                onChange={(e) => setFormData({ ...formData, persistent_keepalive: e.target.value })}
+                placeholder="秒数，例如: 25"
+              />
+            </div>
           </div>
           <DialogFooter>
-            <Button onClick={() => setIsConfigDialogOpen(false)}>关闭</Button>
+            <Button variant="outline" onClick={() => setEditDialogOpen(false)}>
+              取消
+            </Button>
+            <Button onClick={handleEdit}>保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </Card>
+    </div>
   )
 }

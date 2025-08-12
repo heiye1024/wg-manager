@@ -14,7 +14,7 @@ const api = axios.create({
 api.interceptors.request.use(
   (config) => {
     config.headers.Authorization =
-      "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxLCJ1c2VybmFtZSI6ImFkbWluIiwiZXhwIjoxNzU0OTY2MTM2LCJuYmYiOjE3NTQ4Nzk3MzYsImlhdCI6MTc1NDg3OTczNn0.Q65ZefijHCB3BvVMQ3y2yjBIRPa26RSzu5osqftgSwU"
+      "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxLCJ1c2VybmFtZSI6ImFkbWluIiwiZXhwIjoxNzU1MDUyNjQ2LCJuYmYiOjE3NTQ5NjYyNDYsImlhdCI6MTc1NDk2NjI0Nn0.wu_oN1cG_pnGZe2KHe2CB_2nsh2Yvbh7m0TNvVOaNdM"
     return config
   },
   (error) => Promise.reject(error)
@@ -41,8 +41,65 @@ api.interceptors.response.use(
   },
 )
 
+export type ApiResp<T = unknown> = {
+  success: boolean
+  message?: string
+  data?: T
+  error?: string
+}
 
 
+
+
+export const interfaceApi = {
+  // 获取所有接口
+  getAll: async () => {
+    const response = await api.get("/wireguard/interfaces")
+    return response
+  },
+
+  // 获取单个接口
+  get: async (id: string) => {
+    const response = await api.get(`/interfaces/${id}`)
+    return response
+  },
+
+  // 创建接口
+  create: async (data: any) => {
+    const response = await api.post("/wireguard/interfaces", data)
+    return response
+  },
+
+  // 更新接口
+  update: async (id: string, data: any) => {
+    const response = await api.put(`/interfaces/${id}`, data)
+    return response
+  },
+
+  // 删除接口
+  delete: async (id: string) => {
+    const response = await api.delete(`/wireguard/interfaces/${id}`)
+    return response
+  },
+
+  // 启动接口
+  start: async (id: number) => {
+    const response = await api.post(`/wireguard/interfaces/${id}/start`)
+    return response
+  },
+
+  // 停止接口
+  stop: async (id: number) => {
+    const response = await api.post(`/wireguard/interfaces/${id}/stop`)
+    return response
+  },
+
+  // 获取接口配置
+  getConfig: async (id: number) => {
+    const response = await api.get(`/wireguard/interfaces/${id}/config`)
+    return response
+  },
+}
 
 
 // WireGuard API
@@ -78,7 +135,52 @@ export const wireguardApi = {
   getSystemStatus: () => api.get("/wireguard/status"),
 }
 
+export const statusApi = {
+  // 获取系统状态
+  getStatus: async () => {
+    const response = await api.get("wireguard/status")
+    return response
+  },
 
+  // 获取服务状态
+  getServiceStatus: async () => {
+    const response = await api.get("/status/services")
+    return response
+  },
+
+  // 获取系统资源
+  getResources: async () => {
+    const response = await api.get("/status/resources")
+    return response
+  },
+}
+
+// 系统状态 API
+export const systemApi = {
+  // 获取系统状态
+  getStatus: async () => {
+    const response = await api.get("/system/status")
+    return response
+  },
+
+  // 获取系统告警
+  getAlerts: async (params?: { type?: string; limit?: number }) => {
+    const response = await api.get("/system/alerts", { params })
+    return response
+  },
+
+  // 获取系统统计
+  getStats: async () => {
+    const response = await api.get("/system/stats")
+    return response
+  },
+
+  // 获取系统资源使用情况
+  getResources: async () => {
+    const response = await api.get("/system/resources")
+    return response
+  },
+}
 
 
 
