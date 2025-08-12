@@ -850,71 +850,74 @@ func (s *WireGuardService) GetInterfaceConfig(id int) (string, error) {
 }
 
 
-func (s *WireGuardService) GetPeerConfig(peerID int) (string, error) {
+func (s *WireGuardService) GetPeerConfig(peerID int, regenerate bool) (string, error) {
     row := s.db.QueryRow(`
         SELECT
-          COALESCE(p.name,''), 
-          COALESCE(p.private_key,''),       -- 客户端私钥
-          COALESCE(p.ip,''),                -- 客户端隧道 IP
+          p.interface_id,
+          COALESCE(p.name,''),
+          COALESCE(p.private_key,''),      -- 客户端私钥
+          COALESCE(p.ip,''),
           COALESCE(p.persistent_keepalive,0),
 
-          COALESCE(i.name,''), i.listen_port,
-          COALESCE(i.address,''),           -- 形如 10.9.0.1/24
-          COALESCE(i.cidr,''),              -- 形如 10.9.0.0/24（可能为空）
-          COALESCE(i.server_ip,''),         -- 形如 10.9.0.1（可能为空）
-          COALESCE(i.dns,''),               -- 接口 DNS
-          COALESCE(i.public_key,'')         -- 服务端公钥（给 [Peer].PublicKey）
+          COALESCE(i.name,''),
+          i.listen_port,
+          COALESCE(i.address,''),
+          COALESCE(i.cidr,''),
+          COALESCE(i.server_ip,''),
+          COALESCE(i.dns,''),
+          COALESCE(i.public_key,'')        -- 服务器公钥（给 [Peer].PublicKey）
         FROM wireguard_peers p
         JOIN wireguard_interfaces i ON i.id = p.interface_id
         WHERE p.id = ?`, peerID)
 
     var (
+        ifaceID int
         pName, privKey, peerIP string
-        keepalive              int
-
+        keepalive int
         ifName, ifAddress, ifCIDR, serverIP, dns, serverPub string
-        listenPort             int
+        listenPort int
     )
-    if err := row.Scan(&pName, &privKey, &peerIP, &keepalive,
+    if err := row.Scan(&ifaceID, &pName, &privKey, &peerIP, &keepalive,
         &ifName, &listenPort, &ifAddress, &ifCIDR, &serverIP, &dns, &serverPub); err != nil {
-        if errors.Is(err, sql.ErrNoRows) {
-            return "", fmt.Errorf("peer not found")
-        }
+        if errors.Is(err, sql.ErrNoRows) { return "", fmt.Errorf("peer not found") }
         return "", err
     }
 
-    privKey = strings.TrimSpace(privKey)
-    if privKey == "" {
-        return "", fmt.Errorf("peer private key missing")
+    // 若无私钥：按需旋转（生成新对，更新 DB & 内核）
+    if strings.TrimSpace(privKey) == "" {
+        if !regenerate {
+            return "", fmt.Errorf("peer private key missing (add ?regenerate=1 to rotate)")
+        }
+        priv, err := wgtypes.GeneratePrivateKey()
+        if err != nil { return "", fmt.Errorf("generate private key: %w", err) }
+        pub := priv.PublicKey().String()
+
+        if _, err := s.db.Exec(`UPDATE wireguard_peers SET private_key=?, public_key=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+            priv.String(), pub, peerID); err != nil {
+            return "", err
+        }
+        privKey = priv.String()
+        // 让内核同步使用新公钥
+        _ = s.ApplyInterfaceConfig(ifaceID)
     }
-    // 推导 cidr/server_ip：如果表里没写，从 address 推
+
+    // 推导 CIDR/server_ip（若表里为空，从 address 推）
     if strings.TrimSpace(ifCIDR) == "" || strings.TrimSpace(serverIP) == "" {
         if ip, ipNet, err := net.ParseCIDR(strings.TrimSpace(ifAddress)); err == nil && ipNet != nil {
             if strings.TrimSpace(ifCIDR) == "" { ifCIDR = ipNet.String() }
             if strings.TrimSpace(serverIP) == "" { serverIP = ip.String() }
         }
     }
-    // 解析前缀长度
     _, ipNet, err := net.ParseCIDR(strings.TrimSpace(ifCIDR))
-    if err != nil {
-        return "", fmt.Errorf("bad interface cidr: %v", err)
-    }
-    if strings.TrimSpace(peerIP) == "" {
-        return "", fmt.Errorf("peer ip missing")
-    }
-    ones, _ := ipNet.Mask.Size() // 例如 24
+    if err != nil { return "", fmt.Errorf("bad interface cidr: %v", err) }
+    if strings.TrimSpace(peerIP) == "" { return "", fmt.Errorf("peer ip missing") }
+    ones, _ := ipNet.Mask.Size()
 
-    // 客户端 Address 用同样前缀长度
     address := fmt.Sprintf("%s/%d", strings.TrimSpace(peerIP), ones)
-
-    // AllowedIPs：默认用接口 CIDR（分流访问内网）
     allowed := strings.TrimSpace(ifCIDR)
 
-    // Endpoint：优先环境变量 WG_PUBLIC_ENDPOINT（域名/公网 IP），否则用 server_ip
     host := strings.TrimSpace(os.Getenv("WG_PUBLIC_ENDPOINT"))
-    if host == "" {
-        host = strings.TrimSpace(serverIP)
-    }
+    if host == "" { host = strings.TrimSpace(serverIP) }
     endpoint := net.JoinHostPort(host, strconv.Itoa(listenPort))
 
     if keepalive <= 0 { keepalive = 25 }
@@ -930,7 +933,8 @@ PublicKey = %s
 AllowedIPs = %s
 Endpoint = %s
 PersistentKeepalive = %d
-`, privKey, address, strings.TrimSpace(dns), strings.TrimSpace(serverPub), allowed, endpoint, keepalive))
+`, strings.TrimSpace(privKey), address, strings.TrimSpace(dns),
+        strings.TrimSpace(serverPub), allowed, endpoint, keepalive))
 
     return cfg, nil
 }
