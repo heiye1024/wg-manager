@@ -469,11 +469,20 @@ func (s *WireGuardService) GetPeers() ([]models.WireGuardPeer, error) {
 
 func (s *WireGuardService) GetPeersByInterface(interfaceID int) ([]models.WireGuardPeer, error) {
 	rows, err := s.db.Query(`
-		SELECT id, interface_id, name, public_key, private_key, allowed_ips,
-			   COALESCE(endpoint, '') AS endpoint,
-			   COALESCE(persistent_keepalive, 0) AS persistent_keepalive,
-			   COALESCE(status, 'disconnected') AS status,
-			   last_handshake, bytes_received, bytes_sent, created_at, updated_at
+		SELECT
+		  id, interface_id, name,
+		  COALESCE(public_key,'')          AS public_key,
+		  COALESCE(private_key,'')         AS private_key,
+		  COALESCE(ip,'')                  AS ip,             -- ← 新增
+		  COALESCE(allowed_ips,'')         AS allowed_ips,
+		  COALESCE(preshared_key,'')       AS preshared_key,  -- ← 需要 PSK 时新增
+		  COALESCE(endpoint,'')            AS endpoint,
+		  COALESCE(persistent_keepalive,0) AS persistent_keepalive,
+		  COALESCE(status,'disconnected')  AS status,
+		  last_handshake,
+		  COALESCE(bytes_received,0)       AS bytes_received,
+		  COALESCE(bytes_sent,0)           AS bytes_sent,
+		  created_at, updated_at
 		FROM wireguard_peers
 		WHERE interface_id = ?
 		ORDER BY created_at DESC`, interfaceID)
@@ -485,13 +494,23 @@ func (s *WireGuardService) GetPeersByInterface(interfaceID int) ([]models.WireGu
 	var list []models.WireGuardPeer
 	for rows.Next() {
 		var p models.WireGuardPeer
+		var last sql.NullTime
+
 		if err := rows.Scan(
-			&p.ID, &p.InterfaceID, &p.Name, &p.PublicKey, &p.PrivateKey,
-			&p.AllowedIPs, &p.Endpoint, &p.PersistentKeepalive, &p.Status,
-			&p.LastHandshake, &p.BytesReceived, &p.BytesSent,
+			&p.ID, &p.InterfaceID, &p.Name,
+			&p.PublicKey, &p.PrivateKey,
+			&p.IP, &p.AllowedIPs,           // ← 对齐新增列
+			&p.PresharedKey,                // ← 若没用 PSK，请从 SELECT 和这里都删掉
+			&p.Endpoint, &p.PersistentKeepalive,
+			&p.Status, &last,
+			&p.BytesReceived, &p.BytesSent,
 			&p.CreatedAt, &p.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)
+		}
+		if last.Valid {
+			t := last.Time
+			p.LastHandshake = &t
 		}
 		list = append(list, p)
 	}
@@ -757,51 +776,7 @@ func (s *WireGuardService) DeletePeer(id int) error {
 
 /* -------------------- 配置导出（.conf 文本） -------------------- */
 
-func (s *WireGuardService) GetInterfaceConfig(id int) (string, error) {
-	iface, err := s.GetInterface(id)
-	if err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(iface.PrivateKey) == "" {
-		return "", errors.New("interface private key missing")
-	}
-	if iface.ListenPort == 0 {
-		return "", errors.New("listen port required")
-	}
-	if strings.TrimSpace(iface.Address) == "" {
-		return "", errors.New("address required")
-	}
-	peers, err := s.GetPeersByInterface(id)
-	if err != nil {
-		return "", err
-	}
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "[Interface]\nPrivateKey = %s\nAddress = %s\nListenPort = %d\n", iface.PrivateKey, iface.Address, iface.ListenPort)
-	if iface.MTU > 0 {
-		fmt.Fprintf(&b, "MTU = %d\n", iface.MTU)
-	}
-	if strings.TrimSpace(iface.DNS) != "" {
-		fmt.Fprintf(&b, "DNS = %s\n", iface.DNS)
-	}
-
-	for _, p := range peers {
-		if strings.TrimSpace(p.PublicKey) == "" {
-			continue
-		}
-		fmt.Fprintf(&b, "\n[Peer]\nPublicKey = %s\n", p.PublicKey)
-		if strings.TrimSpace(p.AllowedIPs) != "" {
-			fmt.Fprintf(&b, "AllowedIPs = %s\n", p.AllowedIPs)
-		}
-		if strings.TrimSpace(p.Endpoint) != "" {
-			fmt.Fprintf(&b, "Endpoint = %s\n", p.Endpoint)
-		}
-		if p.PersistentKeepalive > 0 {
-			fmt.Fprintf(&b, "PersistentKeepalive = %d\n", p.PersistentKeepalive)
-		}
-	}
-	return b.String(), nil
-}
 
 func (s *WireGuardService) GetInterfaceConfig(id int) (string, error) {
 	iface, err := s.GetInterface(id)
