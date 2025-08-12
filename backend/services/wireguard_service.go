@@ -189,6 +189,14 @@ func nullStr(s *string) sql.NullString {
 	return sql.NullString{String: strings.TrimSpace(*s), Valid: true}
 }
 
+// 把 *string 安全取值（nil -> ""）
+func strFromPtr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
 /* -------------------- 接口（DB） -------------------- */
 
 func (s *WireGuardService) GetInterfaces() ([]models.WireGuardInterface, error) {
@@ -410,38 +418,62 @@ func (s *WireGuardService) GetPeer(id int) (*models.WireGuardPeer, error) {
 }
 
 func (s *WireGuardService) CreatePeer(ctx context.Context, req *models.CreatePeerRequest) (*Peer, error) {
-	// 默认 keepalive = 25
+	// 0) keepalive 默认 25
 	keepalive := 25
 	if req.PersistentKeepalive != nil && *req.PersistentKeepalive > 0 {
 		keepalive = *req.PersistentKeepalive
 	}
 
-	// 事务（尽量用串行化以减少并发撞 IP；SQLite/PG/MySQL 都可）
+	// 1) 事务（串行化更稳）
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		_ = tx.Rollback() // 若已提交，会返回 sql.ErrTxDone，忽略即可
-	}()
+	defer func() { _ = tx.Rollback() }()
 
-	// 1) 锁接口行
-	// MySQL/PG: 可在 SELECT 末尾加 FOR UPDATE；SQLite 不支持，依赖串行化事务
-	qIface := "SELECT id, name, cidr, server_ip FROM wireguard_interfaces WHERE id = ?"
-	var iface ifaceRow
-	if err := tx.QueryRowContext(ctx, qIface, req.InterfaceID).Scan(&iface.ID, &iface.Name, &iface.CIDR, &iface.ServerIP); err != nil {
+	// 2) 读取接口（带 address，cidr，server_ip），用 NullString 扫描
+	var iface struct {
+		ID       uint
+		Name     string
+		Address  sql.NullString
+		CIDR     sql.NullString
+		ServerIP sql.NullString
+	}
+	row := tx.QueryRowContext(ctx,
+		`SELECT id, name, address, cidr, server_ip 
+		   FROM wireguard_interfaces WHERE id = ?`, req.InterfaceID)
+	if err := row.Scan(&iface.ID, &iface.Name, &iface.Address, &iface.CIDR, &iface.ServerIP); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("interface not found")
+			return nil, fmt.Errorf("%w: interface not found", ErrNotFound)
 		}
 		return nil, err
 	}
-	if strings.TrimSpace(iface.CIDR) == "" || strings.TrimSpace(iface.ServerIP) == "" {
-		return nil, fmt.Errorf("interface missing cidr/server_ip")
+
+	cidr := strings.TrimSpace(iface.CIDR.String)
+	serverIP := strings.TrimSpace(iface.ServerIP.String)
+
+	// 2.1) 若缺失，则从 address 推导并回写
+	if cidr == "" || serverIP == "" {
+		if iface.Address.Valid && strings.Contains(iface.Address.String, "/") {
+			if ip, ipNet, perr := net.ParseCIDR(strings.TrimSpace(iface.Address.String)); perr == nil && ipNet != nil {
+				cidr = ipNet.String()
+				serverIP = ip.String()
+				if _, perr := tx.ExecContext(ctx,
+					`UPDATE wireguard_interfaces SET cidr = ?, server_ip = ? WHERE id = ?`,
+					cidr, serverIP, iface.ID,
+				); perr != nil {
+					return nil, perr
+				}
+			}
+		}
+	}
+	if cidr == "" || serverIP == "" {
+		return nil, fmt.Errorf("%w: interface missing cidr/server_ip", ErrBadRequest)
 	}
 
-	// 2) 收集已用 IP（含 server_ip）
-	used := map[string]struct{}{iface.ServerIP: {}}
-	rows, err := tx.QueryContext(ctx, "SELECT ip FROM wireguard_peers WHERE interface_id = ?", req.InterfaceID)
+	// 3) 收集已用 IP（含 server_ip）
+	used := map[string]struct{}{serverIP: {}}
+	rows, err := tx.QueryContext(ctx, `SELECT ip FROM wireguard_peers WHERE interface_id = ?`, req.InterfaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -453,19 +485,23 @@ func (s *WireGuardService) CreatePeer(ctx context.Context, req *models.CreatePee
 		}
 		used[ip] = struct{}{}
 	}
-	rows.Close()
-
-	// 3) 分配 IP
-	ipStr, err := ipam.AllocateNextIP(iface.CIDR, used, iface.ServerIP)
-	if err != nil {
+	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 
-	// 4) allowed_ips 兜底
-	allowed := ""
-	if req.AllowedIPs != nil && strings.TrimSpace(*req.AllowedIPs) != "" {
-		allowed = strings.TrimSpace(*req.AllowedIPs)
-	} else {
+	// 4) 分配 IP
+	ipStr, err := ipam.AllocateNextIP(cidr, used, serverIP)
+	if err != nil {
+		// 可选：将 IP 池耗尽映射为冲突
+		if errors.Is(err, ipam.ErrNoAvailableIP) {
+			return nil, fmt.Errorf("%w: no available ip in %s", ErrConflict, cidr)
+		}
+		return nil, err
+	}
+
+	// 5) allowed_ips 兜底
+	allowed := strings.TrimSpace(strFromPtr(req.AllowedIPs))
+	if allowed == "" {
 		if net.ParseIP(ipStr).To4() != nil {
 			allowed = fmt.Sprintf("%s/32", ipStr)
 		} else {
@@ -473,19 +509,27 @@ func (s *WireGuardService) CreatePeer(ctx context.Context, req *models.CreatePee
 		}
 	}
 
-	// 5) 插入
+	// 6) 插入
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO wireguard_peers(interface_id, name, ip, allowed_ips, endpoint, persistent_keepalive, public_key)
-         VALUES(?,?,?,?,?,?,?)`,
-		req.InterfaceID, strings.TrimSpace(req.Name), ipStr, allowed, nullStr(req.Endpoint), keepalive, nullStr(req.PublicKey),
+		`INSERT INTO wireguard_peers
+		 (interface_id, name, ip, allowed_ips, endpoint, persistent_keepalive, public_key)
+		 VALUES(?,?,?,?,?,?,?)`,
+		req.InterfaceID,
+		strings.TrimSpace(req.Name),
+		ipStr,
+		allowed,
+		nullStr(req.Endpoint),
+		keepalive,
+		nullStr(req.PublicKey),
 	)
 	if err != nil {
-		// 唯一键冲突友好化（不同驱动的错误码不同，这里简单用字符串识别）
-		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			return nil, fmt.Errorf("ip already allocated in this interface")
+		l := strings.ToLower(err.Error())
+		if strings.Contains(l, "unique") || strings.Contains(l, "duplicate") || strings.Contains(l, "constraint") {
+			return nil, fmt.Errorf("%w: ip already allocated in this interface", ErrConflict)
 		}
 		return nil, err
 	}
+
 	id64, _ := res.LastInsertId()
 	peer := &Peer{
 		ID:                  uint(id64),
@@ -498,12 +542,11 @@ func (s *WireGuardService) CreatePeer(ctx context.Context, req *models.CreatePee
 		PublicKey:           nullStr(req.PublicKey),
 	}
 
-	// 6) 提交事务
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 
-	// 7) （可选）下发到内核：使用 wgctrl
+	// 可选：wgctrl 下发内核
 	// _ = s.applyPeerToKernel(ctx, iface.Name, peer)
 
 	return peer, nil
