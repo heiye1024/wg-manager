@@ -37,6 +37,7 @@ type WireGuardPeer struct {
 	PrivateKey          string     `json:"private_key" db:"private_key"`
 	IP                  string     `db:"ip" json:"ip"`
 	AllowedIPs          string     `json:"allowed_ips" db:"allowed_ips"`
+	PresharedKey        string    `json:"preshared_key,omitempty"`
 	Endpoint            string     `json:"endpoint" db:"endpoint"`
 	PersistentKeepalive int        `json:"persistent_keepalive" db:"persistent_keepalive"`
 	Status              string     `json:"status" db:"status"`
