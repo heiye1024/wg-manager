@@ -776,7 +776,7 @@ func (s *WireGuardService) DeletePeer(id int) error {
 
 /* -------------------- 配置导出（.conf 文本） -------------------- */
 
-ffunc (s *WireGuardService) GetInterfaceConfig(id int) (string, error) {
+func (s *WireGuardService) GetInterfaceConfig(id int) (string, error) {
     iface, err := s.GetInterface(id)
     if err != nil {
         return "", err
