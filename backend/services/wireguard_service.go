@@ -182,11 +182,12 @@ type Peer struct {
 	PublicKey           sql.NullString
 }
 
-func nullStr(s *string) sql.NullString {
-	if s == nil || strings.TrimSpace(*s) == "" {
+// 工具：把 *string 转成 sql.NullString（nil/空串 => NULL）
+func nullStr(p *string) sql.NullString {
+	if p == nil || strings.TrimSpace(*p) == "" {
 		return sql.NullString{Valid: false}
 	}
-	return sql.NullString{String: strings.TrimSpace(*s), Valid: true}
+	return sql.NullString{String: strings.TrimSpace(*p), Valid: true}
 }
 
 // 把 *string 安全取值（nil -> ""）
