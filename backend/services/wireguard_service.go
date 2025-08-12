@@ -353,13 +353,27 @@ func (s *WireGuardService) DeleteInterface(id int) error {
 
 func (s *WireGuardService) GetPeers() ([]models.WireGuardPeer, error) {
 	rows, err := s.db.Query(`
-		SELECT id, interface_id, name, public_key, private_key, allowed_ips,
-			   COALESCE(endpoint, '') AS endpoint,
-			   COALESCE(persistent_keepalive, 0) AS persistent_keepalive,
-			   COALESCE(status, 'disconnected') AS status,
-			   last_handshake, bytes_received, bytes_sent, created_at, updated_at
-		FROM wireguard_peers
-		ORDER BY created_at DESC`)
+	SELECT
+		p.id,
+		p.interface_id,
+		i.name                              AS interface_name,
+		p.name,
+		p.ip,
+		p.allowed_ips,
+		COALESCE(p.endpoint, '')            AS endpoint,
+		COALESCE(p.persistent_keepalive, 0) AS persistent_keepalive,
+		COALESCE(p.public_key, '')          AS public_key,
+		COALESCE(p.private_key, '')         AS private_key,
+		COALESCE(p.status, 'disconnected')  AS status,
+		p.last_handshake,
+		COALESCE(p.bytes_received, 0)       AS bytes_received,
+		COALESCE(p.bytes_sent, 0)           AS bytes_sent,
+		p.created_at,
+		p.updated_at
+	FROM wireguard_peers p
+	LEFT JOIN wireguard_interfaces i ON i.id = p.interface_id
+	ORDER BY p.created_at DESC;
+	`)
 	if err != nil {
 		return nil, fmt.Errorf("query peers: %w", err)
 	}

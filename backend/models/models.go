@@ -31,6 +31,7 @@ type WireGuardInterface struct {
 type WireGuardPeer struct {
 	ID                  int        `json:"id" db:"id"`
 	InterfaceID         int        `json:"interface_id" db:"interface_id"`
+	InterfaceName       string     `json:"interface_name"`
 	Name                string     `json:"name" db:"name"`
 	PublicKey           string     `json:"public_key" db:"public_key"`
 	PrivateKey          string     `json:"private_key" db:"private_key"`
