@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"os"
+	"strconv"
 )
 
 type WireGuardService struct {
