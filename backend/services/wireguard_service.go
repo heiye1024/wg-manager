@@ -352,44 +352,47 @@ func (s *WireGuardService) DeleteInterface(id int) error {
 /* -------------------- Peer（DB） -------------------- */
 
 func (s *WireGuardService) GetPeers() ([]models.WireGuardPeer, error) {
+	// 1) 先把基础信息从 DB 查出来（你已有的 SELECT）
 	rows, err := s.db.Query(`
-	SELECT
-		p.id,
-		p.interface_id,
-		i.name                              AS interface_name,
-		p.name,
-		p.ip,
-		p.allowed_ips,
-		COALESCE(p.endpoint, '')            AS endpoint,
-		COALESCE(p.persistent_keepalive, 0) AS persistent_keepalive,
-		COALESCE(p.public_key, '')          AS public_key,
-		COALESCE(p.private_key, '')         AS private_key,
-		COALESCE(p.status, 'disconnected')  AS status,
-		p.last_handshake,
-		COALESCE(p.bytes_received, 0)       AS bytes_received,
-		COALESCE(p.bytes_sent, 0)           AS bytes_sent,
-		p.created_at,
-		p.updated_at
-	FROM wireguard_peers p
-	LEFT JOIN wireguard_interfaces i ON i.id = p.interface_id
-	ORDER BY p.created_at DESC;
-	`)
+	  SELECT
+	    p.id,
+	    p.interface_id,
+	    i.name                              AS interface_name,
+	    p.name,
+	    p.ip,
+	    p.allowed_ips,
+	    COALESCE(p.endpoint, '')            AS endpoint,
+	    COALESCE(p.persistent_keepalive, 0) AS persistent_keepalive,
+	    COALESCE(p.public_key, '')          AS public_key,
+	    COALESCE(p.private_key, '')         AS private_key,
+	    COALESCE(p.status, 'disconnected')  AS status,
+	    p.last_handshake,
+	    COALESCE(p.bytes_received, 0)       AS bytes_received,
+	    COALESCE(p.bytes_sent, 0)           AS bytes_sent,
+	    p.created_at,
+	    p.updated_at
+	  FROM wireguard_peers p
+	  LEFT JOIN wireguard_interfaces i ON i.id = p.interface_id
+	  ORDER BY p.created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("query peers: %w", err)
 	}
 	defer rows.Close()
 
 	var list []models.WireGuardPeer
+	type itemPtr = *models.WireGuardPeer
+
+	// 2) 先扫描到内存；用 (interface_name + public_key) 做索引，方便覆盖
+	idx := make(map[string]itemPtr)
 	for rows.Next() {
 		var p models.WireGuardPeer
 		var last sql.NullTime
-
 		if err := rows.Scan(
 			&p.ID,
 			&p.InterfaceID,
-			&p.InterfaceName, // i.name
+			&p.InterfaceName,
 			&p.Name,
-			&p.IP, // p.ip
+			&p.IP,
 			&p.AllowedIPs,
 			&p.Endpoint,
 			&p.PersistentKeepalive,
@@ -406,10 +409,48 @@ func (s *WireGuardService) GetPeers() ([]models.WireGuardPeer, error) {
 		}
 		if last.Valid {
 			t := last.Time
-			p.LastHandshake = &t // 若你的字段不是 *time.Time，请按需改
+			p.LastHandshake = &t
 		}
+
 		list = append(list, p)
+		key := p.InterfaceName + "|" + p.PublicKey
+		idx[key] = &list[len(list)-1]
 	}
+
+	// 3) 用 wgctrl 获取实时状态，覆盖到返回值
+	devs, err := s.client.Devices()
+	if err == nil {
+		const recent = 180 * time.Second
+		now := time.Now()
+
+		for _, d := range devs {
+			for _, pr := range d.Peers {
+				key := d.Name + "|" + pr.PublicKey.String()
+				if it, ok := idx[key]; ok {
+					if pr.Endpoint != nil {
+						it.Endpoint = pr.Endpoint.String()
+					}
+					// 最新握手
+					if !pr.LastHandshakeTime.IsZero() {
+						t := pr.LastHandshakeTime
+						it.LastHandshake = &t
+					} else {
+						it.LastHandshake = nil
+					}
+					// 流量（uint64 -> int64/你的类型）
+					it.BytesReceived = int64(pr.ReceiveBytes)
+					it.BytesSent = int64(pr.TransmitBytes)
+					// 状态
+					if !pr.LastHandshakeTime.IsZero() && now.Sub(pr.LastHandshakeTime) <= recent {
+						it.Status = "connected"
+					} else {
+						it.Status = "disconnected"
+					}
+				}
+			}
+		}
+	} // 如果 wgctrl 出错，就保留 DB 的值返回
+
 	return list, nil
 }
 
