@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  wireguard-manager:
+    build: .
+    container_name: wireguard-manager
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - /lib/modules:/lib/modules:ro
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    environment:
+      - DATABASE_PATH=/app/data/wireguard.db
+      - JWT_SECRET=your-secret-key-change-this-in-production
+      - PORT=8080
+      - LOG_LEVEL=info
+    restart: unless-stopped
+    privileged: true
+    network_mode: host
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: wireguard-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+    depends_on:
+      - wireguard-manager
+    restart: unless-stopped
