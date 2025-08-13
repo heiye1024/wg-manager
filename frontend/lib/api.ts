@@ -13,11 +13,16 @@ const api = axios.create({
 // 请求拦截器
 api.interceptors.request.use(
   (config) => {
-    config.headers.Authorization =
-      "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxLCJ1c2VybmFtZSI6ImFkbWluIiwiZXhwIjoxNzU1MTQyMDE1LCJuYmYiOjE3NTUwNTU2MTUsImlhdCI6MTc1NTA1NTYxNX0.1nQMtqIwPmp1ry-YqEdmO9c6x8-9g3ACXcleejl1u7M"
+    const token = localStorage.getItem("token")
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`
+    } else {
+      // 没 token 就不要带 Authorization
+      delete (config.headers as any).Authorization
+    }
     return config
   },
-  (error) => Promise.reject(error)
+  (error) => Promise.reject(error),
 )
 
 // 响应拦截器
@@ -41,6 +46,10 @@ api.interceptors.response.use(
   },
 )
 
+
+
+
+
 export type ApiResp<T = unknown> = {
   success: boolean
   message?: string
@@ -48,6 +57,56 @@ export type ApiResp<T = unknown> = {
   error?: string
 }
 
+
+
+export const authApi = {
+  // 用户登录
+  login: async (credentials: { username: string; password: string }) => {
+    const response = await api.post("/auth/login", credentials)
+    return response
+  },
+
+  // 用户登出
+  logout: async () => {
+    const token = localStorage.getItem("token")
+    const response = await api.post(
+      "/auth/logout",
+      {},
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    )
+    return response
+  },
+
+  // 验证令牌
+  verifyToken: async () => {
+    const token = localStorage.getItem("token")
+    const response = await api.get("/auth/verify", {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    return response
+  },
+
+  // 刷新令牌
+  refreshToken: async () => {
+    const token = localStorage.getItem("token")
+    const response = await api.post(
+      "/auth/refresh",
+      {},
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    )
+    return response
+  },
+}
 
 
 
