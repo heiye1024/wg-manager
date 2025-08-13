@@ -19,28 +19,31 @@ interface WireGuardInterface {
   peers: any[]
 }
 
-
 export default function WireGuardPage() {
-    const [interfaces, setInterfaces] = useState<WireGuardInterface[]>([])
-    const [interfacesLoading, setInterfacesLoading] = useState(true)
+  const [interfaces, setInterfaces] = useState<WireGuardInterface[]>([])
+  const [interfacesLoading, setInterfacesLoading] = useState(true)
 
-    const loadInterfaces = async () => {
-        try {
-        setInterfacesLoading(true)
-        const response = await interfaceApi.getAll()
-        if (response.data.success) {
-            setInterfaces(response.data.data)
-        }
-        } catch (error) {
-        console.error("Failed to load interfaces:", error)
-        } finally {
-        setInterfacesLoading(false)
-        }
+  const loadInterfaces = async () => {
+    try {
+      setInterfacesLoading(true)
+      const response = await interfaceApi.getAll()
+      if (response.data.success) {
+        setInterfaces(response.data.data)
+      }
+    } catch (error) {
+      console.error("Failed to load interfaces:", error)
+    } finally {
+      setInterfacesLoading(false)
     }
+  }
 
-    const handleInterfacesChange = () => {
-        loadInterfaces()
-    }
+  useEffect(() => {
+    loadInterfaces()
+  }, [])
+
+  const handleInterfacesChange = () => {
+    loadInterfaces()
+  }
 
   return (
     <DashboardShell>
@@ -48,7 +51,7 @@ export default function WireGuardPage() {
         <div>
           <h2 className="text-3xl font-bold tracking-tight bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
             WireGuard 管理
-          </h2> 
+          </h2>
           <p className="text-slate-600 dark:text-slate-400 font-medium">管理 VPN 接口、客户端连接和系统配置</p>
         </div>
       </div>
@@ -76,7 +79,6 @@ export default function WireGuardPage() {
         <TabsContent value="status" className="space-y-6">
           <StatusMonitor />
         </TabsContent>
-
 
         <TabsContent value="interfaces" className="space-y-6">
           <InterfaceManager />

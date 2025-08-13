@@ -129,10 +129,10 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
           const rows = Array.isArray(res?.data)
             ? res.data
             : Array.isArray(res?.data?.list)
-            ? res.data.list
-            : Array.isArray(res?.items)
-            ? res.items
-            : []
+              ? res.data.list
+              : Array.isArray(res?.items)
+                ? res.items
+                : []
           const mapped = rows.map((i: any) => ({
             id: String(i.id),
             name: i.name,
@@ -197,8 +197,7 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
       // 空串就不传 endpoint（让后端用默认/忽略）
       ...(formData.endpoint.trim() ? { endpoint: formData.endpoint.trim() } : {}),
       // 留空默认 25，否则转 number
-      persistent_keepalive:
-        formData.persistent_keepalive === "" ? 25 : Number(formData.persistent_keepalive),
+      persistent_keepalive: formData.persistent_keepalive === "" ? 25 : Number(formData.persistent_keepalive),
     }
 
     // 2) 基本校验
@@ -240,7 +239,6 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
       })
     }
   }
-
 
   const handleEdit = async () => {
     if (!editingPeer) return
@@ -332,8 +330,7 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
       }
 
       // 文件名：能读到 Content-Disposition 就用；否则兜底
-      const cd =
-        (typeof res === "object" && res?.headers && res.headers["content-disposition"]) || ""
+      const cd = (typeof res === "object" && res?.headers && res.headers["content-disposition"]) || ""
       const m = /filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/i.exec(cd)
       const filename = decodeURIComponent(m?.[1] || m?.[2] || `peer-${id}.conf`)
       const safeName = filename.endsWith(".conf") ? filename : `${filename}.conf`
@@ -350,11 +347,7 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
 
       toast({ title: "成功", description: "配置文件下载成功" })
     } catch (err: any) {
-      const msg =
-        err?.response?.data?.error ||
-        err?.response?.data?.message ||
-        err?.message ||
-        "下载配置文件失败"
+      const msg = err?.response?.data?.error || err?.response?.data?.message || err?.message || "下载配置文件失败"
       toast({ title: "错误", description: msg, variant: "destructive" })
     }
   }
@@ -459,7 +452,10 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
           </Button>
           <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
             <DialogTrigger asChild>
-              <Button disabled={safeInterfaces.length === 0}>
+              <Button
+                disabled={safeInterfaces.length === 0}
+                className="bg-gradient-to-r from-blue-500 to-purple-500 hover:from-blue-600 hover:to-purple-600 text-white border-0 shadow-md hover:shadow-lg transition-all duration-150"
+              >
                 <Plus className="h-4 w-4 mr-2" />
                 添加客户端
                 {safeInterfaces.length === 0 && " (需要先创建接口)"}
@@ -568,6 +564,7 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
                   variant={viewMode === "table" ? "default" : "outline"}
                   size="sm"
                   onClick={() => setViewMode("table")}
+                  className={viewMode === "table" ? "bg-gradient-to-r from-blue-500 to-purple-500 text-white" : ""}
                 >
                   <List className="h-4 w-4 mr-2" />
                   列表视图
@@ -576,6 +573,7 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
                   variant={viewMode === "grouped" ? "default" : "outline"}
                   size="sm"
                   onClick={() => setViewMode("grouped")}
+                  className={viewMode === "grouped" ? "bg-gradient-to-r from-blue-500 to-purple-500 text-white" : ""}
                 >
                   <Layers className="h-4 w-4 mr-2" />
                   分组视图
@@ -600,11 +598,14 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
             <h3 className="text-lg font-medium mb-2">暂无配置的客户端连接</h3>
             <p className="text-muted-foreground mb-4 text-center">
               {safeInterfaces.length === 0
-                ? "请先在“网络接口”标签页创建 WireGuard 接口，然后添加客户端连接"
+                ? "请先创建 WireGuard 接口，然后添加客户端连接"
                 : "添加您的第一个客户端连接以开始 VPN 服务"}
             </p>
             {safeInterfaces.length > 0 && (
-              <Button onClick={() => setCreateDialogOpen(true)}>
+              <Button
+                onClick={() => setCreateDialogOpen(true)}
+                className="bg-gradient-to-r from-blue-500 to-purple-500 hover:from-blue-600 hover:to-purple-600 text-white border-0 shadow-md hover:shadow-lg transition-all duration-150"
+              >
                 <Plus className="h-4 w-4 mr-2" />
                 添加客户端连接
               </Button>
