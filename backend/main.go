@@ -31,9 +31,10 @@ func main() {
 		AllowOrigins:     []string{"*"}, // 允许所有域名访问
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Requested-With"},
-		ExposeHeaders:    []string{"Content-Length"},
+		ExposeHeaders:    []string{"Content-Length", "Content-Disposition"},
 		AllowCredentials: true, // 如不带 cookie 可设为 false
-		MaxAge:           12 * time.Hour,
+
+		MaxAge: 12 * time.Hour,
 	}))
 
 	// Initialize services

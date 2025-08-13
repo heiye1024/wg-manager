@@ -14,7 +14,7 @@ const api = axios.create({
 api.interceptors.request.use(
   (config) => {
     config.headers.Authorization =
-      "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxLCJ1c2VybmFtZSI6ImFkbWluIiwiZXhwIjoxNzU1MDUyNjQ2LCJuYmYiOjE3NTQ5NjYyNDYsImlhdCI6MTc1NDk2NjI0Nn0.wu_oN1cG_pnGZe2KHe2CB_2nsh2Yvbh7m0TNvVOaNdM"
+      "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxLCJ1c2VybmFtZSI6ImFkbWluIiwiZXhwIjoxNzU1MTQyMDE1LCJuYmYiOjE3NTUwNTU2MTUsImlhdCI6MTc1NTA1NTYxNX0.1nQMtqIwPmp1ry-YqEdmO9c6x8-9g3ACXcleejl1u7M"
     return config
   },
   (error) => Promise.reject(error)
@@ -130,7 +130,14 @@ export const wireguardApi = {
   restartService: () => api.post("/wireguard/restart"),
 
   // 生成客户端配置
-  generateClientConfig: (id: string) => api.get(`/wireguard/peers/${id}/config`),
+  //generateClientConfig: (id: string) => api.get(`/wireguard/peers/${id}/config`),
+
+  generateClientConfig: (id: string) =>
+  api.get(`/wireguard/peers/${id}/config`, {
+    responseType: "text",        // 很关键：告诉 axios 不要当 JSON 解析
+    transformResponse: r => r,   // 保留原始文本，避免自动 JSON 解析
+    headers: { Accept: "text/plain" },
+  }),
 
   getSystemStatus: () => api.get("/wireguard/status"),
 }

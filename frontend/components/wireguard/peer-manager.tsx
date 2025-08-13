@@ -312,30 +312,50 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
 
   const handleDownloadConfig = async (id: string) => {
     try {
-      const response = await wireguardApi.generateClientConfig(id)
+      const res = await wireguardApi.generateClientConfig(id)
 
-      if (response.success && response.data) {
-        const blob = new Blob([response.data], { type: "text/plain" })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement("a")
-        a.href = url
-        a.download = `peer-${id}.conf`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
-
-        toast({
-          title: "成功",
-          description: "配置文件下载成功",
-        })
+      // 统一提取文本：兼容 1) 拦截器返回 "string"；2) AxiosResponse<string>；3) JSON 包裹 { data: "..." }
+      const pickText = (r: any): string => {
+        if (typeof r === "string") return r
+        if (typeof r?.data === "string") return r.data
+        if (r && typeof r?.data?.data === "string") return r.data.data
+        if (r && r.success && typeof r.data === "string") return r.data
+        return ""
       }
-    } catch (error) {
-      toast({
-        title: "错误",
-        description: "下载配置文件失败",
-        variant: "destructive",
-      })
+
+      let text = pickText(res)
+      if (!text) throw new Error("配置为空或返回结构未识别")
+
+      // 若后端把换行做成了字面量 '\n'，这里还原
+      if (text.includes("\\n") && !text.includes("\n")) {
+        text = text.replace(/\\r?\\n/g, "\n")
+      }
+
+      // 文件名：能读到 Content-Disposition 就用；否则兜底
+      const cd =
+        (typeof res === "object" && res?.headers && res.headers["content-disposition"]) || ""
+      const m = /filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/i.exec(cd)
+      const filename = decodeURIComponent(m?.[1] || m?.[2] || `peer-${id}.conf`)
+      const safeName = filename.endsWith(".conf") ? filename : `${filename}.conf`
+
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = safeName
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+
+      toast({ title: "成功", description: "配置文件下载成功" })
+    } catch (err: any) {
+      const msg =
+        err?.response?.data?.error ||
+        err?.response?.data?.message ||
+        err?.message ||
+        "下载配置文件失败"
+      toast({ title: "错误", description: msg, variant: "destructive" })
     }
   }
 
