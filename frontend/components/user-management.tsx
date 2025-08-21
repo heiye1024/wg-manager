@@ -271,7 +271,7 @@ export function UserManagement() {
 
   // 切换用户状态
   const toggleUserStatus = async (user: User) => {
-    const newStatus = user.status === "active" ? "inactive" : "active"
+    const newStatus: User["status"] = user.status === "active" ? "inactive" : "active"
     const updatedUsers = users.map((u) => (u.id === user.id ? { ...u, status: newStatus } : u))
     setUsers(updatedUsers)
 

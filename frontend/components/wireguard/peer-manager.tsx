@@ -50,7 +50,7 @@ interface Peer {
 }
 
 interface Interface {
-  id: string
+  id: id
   name: string
   status: "active" | "inactive"
 }

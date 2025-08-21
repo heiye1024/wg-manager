@@ -11,9 +11,9 @@ import { interfaceApi } from "@/lib/api"
 import { Activity, Network, Users, Settings } from "lucide-react"
 
 interface WireGuardInterface {
-  id: number
+  id: string
   name: string
-  status: string
+  status: 'active' | 'inactive';
   listen_port: number
   address: string
   peers: any[]
