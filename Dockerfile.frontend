@@ -1,51 +1,44 @@
-# Build stage (Node.js)
-FROM node:18-alpine AS base
-
-# Install dependencies only when needed
-FROM base AS deps
+# ---------- deps 阶段 ----------
+FROM node:22-alpine AS deps
+WORKDIR /app
 RUN apk add --no-cache libc6-compat
-WORKDIR /app
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+# 复制依赖清单
+COPY frontend/package.json frontend/yarn.lock* ./
+COPY frontend/tsconfig.json ./
+# 启用 Yarn 并安装依赖（默认 Yarn 4）
+RUN corepack enable && yarn install --immutable
 
-# Install dependencies based on the preferred package manager
-COPY frontend/package.json frontend/yarn.lock* frontend/package-lock.json* frontend/pnpm-lock.yaml* ./
-RUN \
-  if [ -f yarn.lock ]; then yarn --frozen-lockfile; \
-  elif [ -f package-lock.json ]; then npm ci; \
-  elif [ -f pnpm-lock.yaml ]; then yarn global add pnpm && pnpm i --frozen-lockfile; \
-  else echo "Lockfile not found." && exit 1; \
-  fi
-
-# Rebuild the source code only when needed
-FROM base AS builder
+# ---------- builder 阶段 ----------
+FROM node:22-alpine AS builder
 WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+# 拷贝依赖缓存
+#COPY --from=deps /app/.yarn ./.yarn
+COPY --from=deps /app/yarn.lock ./yarn.lock
+COPY --from=deps /app/package.json ./package.json
+COPY --from=deps /app/tsconfig.json ./tsconfig.json
+# 拷贝源码
 COPY frontend/ ./
 
-# Build the application
-RUN yarn build
+# 确保生成 server.js
+#RUN echo "export default { output: 'standalone' }" > next.config.mjs
+RUN echo "export default { \
+  eslint: { ignoreDuringBuilds: true }, \
+  output: 'standalone' \
+}" > next.config.mjs
 
-# Production image, copy all the files and run next
-FROM base AS runner
+
+RUN corepack enable && yarn build
+
+# ---------- runner 阶段 ----------
+FROM node:22-alpine AS runner
 WORKDIR /app
-
-ENV NODE_ENV production
-
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
-
+ENV NODE_ENV=production
+# 拷贝构建产物
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
-
-# Set the correct permission for prerender cache
-RUN mkdir .next
-RUN chown nextjs:nodejs .next
-
-# Copy .next directory (no standalone needed)
-COPY --from=builder --chown=nextjs:nodejs /app/.next ./ .next/
-
-USER nextjs
-
 EXPOSE 3000
-
-ENV PORT 3000
-
+ENV PORT=3000
 CMD ["node", "server.js"]

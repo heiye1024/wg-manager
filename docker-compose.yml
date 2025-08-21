@@ -22,7 +22,7 @@ services:
       - LOG_LEVEL=info
     restart: unless-stopped
     privileged: true
-    network_mode: host
+    #network_mode: host
 
   frontend:
     build:
