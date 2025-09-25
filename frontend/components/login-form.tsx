@@ -26,12 +26,12 @@ export function LoginForm() {
     try {
       const response = await authApi.login({ username, password })
 
-      if (response.data.success) {
-        localStorage.setItem("token", response.data.data.token)
-        localStorage.setItem("user", JSON.stringify(response.data.data.user))
+      if (response.success && response.data) {
+        localStorage.setItem("token", response.data.token)
+        localStorage.setItem("user", JSON.stringify(response.data.user))
         router.push("/")
       } else {
-        setError(response.data.error || "Login failed")
+        setError(response.error || response.message || "Login failed")
       }
     } catch (error) {
       setError("Network error. Please try again.")

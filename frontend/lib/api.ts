@@ -1,224 +1,239 @@
-import axios from "axios"
-import { get } from "http"
+import axios, {
+  type AxiosInstance,
+  type AxiosRequestConfig,
+  type InternalAxiosRequestConfig,
+} from "axios"
 
-// 创建 axios 实例
-const api = axios.create({
-  baseURL: "http://172.17.1.61:8080/api",
+const DEFAULT_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://172.17.1.61:8080/api"
+
+type ApiClient = Omit<AxiosInstance, "get" | "post" | "put" | "delete"> & {
+  get<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<T>
+  post<T = unknown>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T>
+  put<T = unknown>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T>
+  delete<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<T>
+}
+
+const axiosInstance = axios.create({
+  baseURL: DEFAULT_BASE_URL,
   timeout: 10000,
   headers: {
     "Content-Type": "application/json",
   },
 })
 
-// 请求拦截器
-api.interceptors.request.use(
-  (config) => {
-    const token = localStorage.getItem("token")
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`
-    } else {
-      // 没 token 就不要带 Authorization
-      delete (config.headers as any).Authorization
+axiosInstance.interceptors.request.use(
+  (config: InternalAxiosRequestConfig) => {
+    if (typeof window !== "undefined") {
+      const token = window.localStorage.getItem("token")
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`
+      } else {
+        delete config.headers.Authorization
+      }
     }
     return config
   },
   (error) => Promise.reject(error),
 )
 
-// 响应拦截器
-api.interceptors.response.use(
-  (response) => {
-    return response.data
-  },
+axiosInstance.interceptors.response.use(
+  (response) => response.data,
   (error) => {
-    // 处理错误响应
     if (error.response) {
-      // 服务器返回错误状态码
       console.error("API Error:", error.response.status, error.response.data)
     } else if (error.request) {
-      // 请求发送但没有收到响应
       console.error("API No Response:", error.request)
     } else {
-      // 请求设置出错
       console.error("API Request Error:", error.message)
     }
     return Promise.reject(error)
   },
 )
 
-
-
-
+const api = axiosInstance as ApiClient
 
 export type ApiResp<T = unknown> = {
   success: boolean
   message?: string
   data?: T
   error?: string
+  [key: string]: unknown
+}
+
+export interface WireGuardInterfaceDto {
+  id: string | number
+  name: string
+  status?: string
+  listen_port?: number
+  address?: string
+  peers?: unknown[]
+}
+
+export interface WireGuardPeerDto {
+  id: string | number
+  name?: string
+  public_key?: string
+  allowed_ips?: string
+  endpoint?: string
+  last_handshake?: string
+  bytes_received?: number | string
+  bytes_sent?: number | string
+  persistent_keepalive?: number | string | null
+  status?: string
+  interface_id?: string | number
+}
+
+export interface WireGuardStatusDto {
+  wireguard: {
+    version: string
+    status: string
+    interfaces: number
+    active_peers: number
+    total_peers: number
+  }
+  system: {
+    uptime: string
+    cpu_usage: number
+    memory_usage: number
+    disk_usage: number
+  }
+  network: {
+    bytes_received: number
+    bytes_sent: number
+    packets_received: number
+    packets_sent: number
+  }
+}
+
+export interface WireGuardConfigDto {
+  server_config: {
+    listen_port: number
+    private_key: string
+    public_key: string
+    address: string
+    dns: string
+    mtu: number
+  }
+  global_settings: {
+    auto_start: boolean
+    log_level: string
+    max_peers: number
+    keepalive_interval: number
+  }
 }
 
 
 
-export const authApi = {
-  // 用户登录
-  login: async (credentials: { username: string; password: string }) => {
-    const response = await api.post("/auth/login", credentials)
-    return response
-  },
+type AuthSession = {
+  token: string
+  user: Record<string, unknown>
+}
 
-  // 用户登出
-  logout: async () => {
-    const token = localStorage.getItem("token")
-    const response = await api.post(
+const getAuthHeaders = () => {
+  if (typeof window === "undefined") {
+    return {}
+  }
+
+  const token = window.localStorage.getItem("token")
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+export const authApi = {
+  login: (credentials: { username: string; password: string }) =>
+    api.post<ApiResp<AuthSession>>("/auth/login", credentials),
+
+  logout: () =>
+    api.post<ApiResp<null>>(
       "/auth/logout",
       {},
       {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: getAuthHeaders(),
       },
-    )
-    return response
-  },
+    ),
 
-  // 验证令牌
-  verifyToken: async () => {
-    const token = localStorage.getItem("token")
-    const response = await api.get("/auth/verify", {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    })
-    return response
-  },
+  verifyToken: () =>
+    api.get<ApiResp<{ valid: boolean }>>("/auth/verify", {
+      headers: getAuthHeaders(),
+    }),
 
-  // 刷新令牌
-  refreshToken: async () => {
-    const token = localStorage.getItem("token")
-    const response = await api.post(
+  refreshToken: () =>
+    api.post<ApiResp<AuthSession>>(
       "/auth/refresh",
       {},
       {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: getAuthHeaders(),
       },
-    )
-    return response
-  },
+    ),
 }
 
 
 
 export const interfaceApi = {
-  // 获取所有接口
-  getAll: async () => {
-    const response = await api.get("/wireguard/interfaces")
-    return response
-  },
+  getAll: () => api.get<ApiResp<WireGuardInterfaceDto[]>>("/wireguard/interfaces"),
 
-  // 获取单个接口
-  get: async (id: string) => {
-    const response = await api.get(`/interfaces/${id}`)
-    return response
-  },
+  get: (id: string) => api.get<ApiResp<WireGuardInterfaceDto>>(`/interfaces/${id}`),
 
-  // 创建接口
-  create: async (data: any) => {
-    const response = await api.post("/wireguard/interfaces", data)
-    return response
-  },
+  create: (data: Record<string, unknown>) =>
+    api.post<ApiResp<WireGuardInterfaceDto>>("/wireguard/interfaces", data),
 
-  // 更新接口
-  update: async (id: string, data: any) => {
-    const response = await api.put(`/interfaces/${id}`, data)
-    return response
-  },
+  update: (id: string, data: Record<string, unknown>) =>
+    api.put<ApiResp<WireGuardInterfaceDto>>(`/interfaces/${id}`, data),
 
-  // 删除接口
-  delete: async (id: string) => {
-    const response = await api.delete(`/wireguard/interfaces/${id}`)
-    return response
-  },
+  delete: (id: string) => api.delete<ApiResp<null>>(`/wireguard/interfaces/${id}`),
 
-  // 启动接口
-  start: async (id: number) => {
-    const response = await api.post(`/wireguard/interfaces/${id}/start`)
-    return response
-  },
+  start: (id: number | string) => api.post<ApiResp<null>>(`/wireguard/interfaces/${id}/start`),
 
-  // 停止接口
-  stop: async (id: number) => {
-    const response = await api.post(`/wireguard/interfaces/${id}/stop`)
-    return response
-  },
+  stop: (id: number | string) => api.post<ApiResp<null>>(`/wireguard/interfaces/${id}/stop`),
 
-  // 获取接口配置
-  getConfig: async (id: number) => {
-    const response = await api.get(`/wireguard/interfaces/${id}/config`)
-    return response
-  },
+  getConfig: (id: number | string) =>
+    api.get<string>(`/wireguard/interfaces/${id}/config`, {
+      responseType: "text",
+      transformResponse: (value) => value,
+      headers: { Accept: "text/plain" },
+    }),
 }
 
 
 // WireGuard API
 export const wireguardApi = {
+  getInterfaces: () => api.get<ApiResp<WireGuardInterfaceDto[]>>("/wireguard/interfaces"),
 
-  // 获取所有 WireGuard 接口
-  getInterfaces: () => api.get("/wireguard/interfaces"),
+  getPeers: () => api.get<ApiResp<WireGuardPeerDto[]>>("/wireguard/peers"),
 
-  // 获取所有对等设备
-  getPeers: () => api.get("/wireguard/peers"),
+  getPeer: (id: string) => api.get<ApiResp<WireGuardPeerDto>>(`/wireguard/peers/${id}`),
 
-  // 获取单个对等设备
-  getPeer: (id: string) => api.get(`/wireguard/peers/${id}`),
+  addPeer: (data: Record<string, unknown>) =>
+    api.post<ApiResp<WireGuardPeerDto>>("/wireguard/peers", data),
 
-  // 添加对等设备
-  addPeer: (data: any) => api.post("/wireguard/peers", data),
+  updatePeer: (id: string | number, data: Record<string, unknown>) =>
+    api.put<ApiResp<WireGuardPeerDto>>(`/wireguard/peers/${id}`, data),
 
-  // 更新对等设备
-  updatePeer: (id: string, data: any) => api.put(`/wireguard/peers/${id}`, data),
+  deletePeer: (id: string) => api.delete<ApiResp<null>>(`/wireguard/peers/${id}`),
 
-  // 删除对等设备
-  deletePeer: (id: string) => api.delete(`/wireguard/peers/${id}`),
+  getServerStatus: (id: string) =>
+    api.get<ApiResp<Record<string, unknown>>>(`/wireguard/interfaces/${id}/status`),
 
-  // 获取服务器状态
-  getServerStatus: (id: string) => api.get(`/wireguard/interfaces/${id}/status`),
-
-  // 重启 WireGuard 服务
-  restartService: () => api.post("/wireguard/restart"),
-
-  // 生成客户端配置
-  //generateClientConfig: (id: string) => api.get(`/wireguard/peers/${id}/config`),
+  restartService: () => api.post<ApiResp<null>>("/wireguard/restart"),
 
   generateClientConfig: (id: string) =>
-  api.get(`/wireguard/peers/${id}/config`, {
-    responseType: "text",        // 很关键：告诉 axios 不要当 JSON 解析
-    transformResponse: r => r,   // 保留原始文本，避免自动 JSON 解析
-    headers: { Accept: "text/plain" },
-  }),
+    api.get<string>(`/wireguard/peers/${id}/config`, {
+      responseType: "text",
+      transformResponse: (value) => value,
+      headers: { Accept: "text/plain" },
+    }),
 
-  getSystemStatus: () => api.get("/wireguard/status"),
+  getSystemStatus: () => api.get<ApiResp<WireGuardStatusDto>>("/wireguard/status"),
 }
 
 export const statusApi = {
-  // 获取系统状态
-  getStatus: async () => {
-    const response = await api.get("wireguard/status")
-    return response
-  },
+  getStatus: () =>
+    api.get<ApiResp<WireGuardStatusDto> & { config?: WireGuardConfigDto }>("/wireguard/status"),
 
-  // 获取服务状态
-  getServiceStatus: async () => {
-    const response = await api.get("/status/services")
-    return response
-  },
+  getServiceStatus: () =>
+    api.get<ApiResp<Record<string, unknown>>>("/status/services"),
 
-  // 获取系统资源
-  getResources: async () => {
-    const response = await api.get("/status/resources")
-    return response
-  },
+  getResources: () =>
+    api.get<ApiResp<Record<string, unknown>>>("/status/resources"),
 }
 
 // 系统状态 API

@@ -51,10 +51,15 @@ export function StatusMonitor({ status: propStatus }: StatusMonitorProps) {
 
       const response = await statusApi.getStatus()
 
-      if (response.data.success) {
-        setStatus(response.data.data)
+      if (response.success) {
+        const nextStatus = (response.data as SystemStatus | null) ?? (response.config as SystemStatus | undefined) ?? null
+        if (nextStatus) {
+          setStatus(nextStatus)
+        } else {
+          throw new Error("获取状态数据为空")
+        }
       } else {
-        throw new Error(response.data.error || "获取状态失败")
+        throw new Error(response.error || response.message || "获取状态失败")
       }
     } catch (error) {
       console.error("Failed to load status:", error)
