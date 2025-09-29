@@ -4,7 +4,7 @@ import axios, {
   type InternalAxiosRequestConfig,
 } from "axios"
 
-const DEFAULT_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://172.17.1.61:8080/api"
+const DEFAULT_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://wireguard-manager:8080/api"
 
 type ApiClient = Omit<AxiosInstance, "get" | "post" | "put" | "delete"> & {
   get<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<T>
