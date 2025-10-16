@@ -33,7 +33,7 @@ import {
   Search,
 } from "lucide-react"
 import { wireguardApi } from "@/lib/api"
-import { LoadingState } from "@/components/loading-state"
+import { LoadingState } from "@/components/common/loading-state"
 
 interface Peer {
   id: string
@@ -50,7 +50,7 @@ interface Peer {
 }
 
 interface Interface {
-  id: id
+  id: string
   name: string
   status: "active" | "inactive"
 }
@@ -128,12 +128,10 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
           const res = await wireguardApi.getInterfaces()
           const rows = Array.isArray(res?.data)
             ? res.data
-            : Array.isArray(res?.data?.list)
-              ? res.data.list
-              : Array.isArray(res?.items)
-                ? res.items
-                : []
-          const mapped = rows.map((i: any) => ({
+            : Array.isArray(res?.items)
+              ? (res.items as unknown[])
+              : []
+          const mapped = rows.map<Interface>((i: any) => ({
             id: String(i.id),
             name: i.name,
             status: i.status === "running" ? "active" : "inactive",
@@ -152,7 +150,11 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
       setLoading(true)
       const response = await wireguardApi.getPeers()
       if (response.success) {
-        const rows = Array.isArray(response.data) ? response.data : []
+        const rows = Array.isArray(response.data)
+          ? response.data
+          : Array.isArray(response.items)
+            ? (response.items as unknown[])
+            : []
 
         const mapped: Peer[] = rows.map((r: any) => ({
           id: String(r.id),
@@ -310,7 +312,7 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
 
   const handleDownloadConfig = async (id: string) => {
     try {
-      const res = await wireguardApi.generateClientConfig(id)
+      const res = (await wireguardApi.generateClientConfig(id)) as unknown
 
       // 统一提取文本：兼容 1) 拦截器返回 "string"；2) AxiosResponse<string>；3) JSON 包裹 { data: "..." }
       const pickText = (r: any): string => {
@@ -329,9 +331,17 @@ export function PeerManager({ interfaces = [], onPeersChange }: PeerManagerProps
         text = text.replace(/\\r?\\n/g, "\n")
       }
 
-      // 文件名：能读到 Content-Disposition 就用；否则兜底
-      const cd = (typeof res === "object" && res?.headers && res.headers["content-disposition"]) || ""
-      const m = /filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/i.exec(cd)
+      let disposition = ""
+      if (res && typeof res === "object" && "headers" in res) {
+        const headers = (res as { headers?: Record<string, unknown> }).headers
+        if (headers && typeof headers === "object") {
+          const raw = headers["content-disposition"]
+          if (typeof raw === "string") {
+            disposition = raw
+          }
+        }
+      }
+      const m = /filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/i.exec(disposition)
       const filename = decodeURIComponent(m?.[1] || m?.[2] || `peer-${id}.conf`)
       const safeName = filename.endsWith(".conf") ? filename : `${filename}.conf`
 

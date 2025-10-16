@@ -29,7 +29,7 @@ export function AuthWrapper({ children }: AuthWrapperProps) {
 
       try {
         const response = await authApi.verifyToken()
-        if (response.data.success) {
+        if (response.success) {
           setIsAuthenticated(true)
         } else {
           localStorage.removeItem("token")

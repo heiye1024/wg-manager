@@ -10,23 +10,9 @@ import { Settings, Download, Save, RefreshCw, Info } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { LoadingState } from "@/components/common/loading-state"
 import { statusApi } from "@/lib/api"
+import type { WireGuardConfigDto } from "@/lib/api"
 
-interface WireGuardConfig {
-  server_config: {
-    listen_port: number
-    private_key: string
-    public_key: string
-    address: string
-    dns: string
-    mtu: number
-  }
-  global_settings: {
-    auto_start: boolean
-    log_level: string
-    max_peers: number
-    keepalive_interval: number
-  }
-}
+type WireGuardConfig = WireGuardConfigDto
 
 export function WireguardConfig() {
   const [config, setConfig] = useState<WireGuardConfig | null>(null)
@@ -41,13 +27,20 @@ export function WireguardConfig() {
       console.log("Loaded config:", response)
 
       if (response.success) {
-        setConfig(response.config)
+        const nextConfig =
+          (response.data as unknown as WireGuardConfig | undefined) ??
+          (response.config as WireGuardConfig | undefined)
+        if (nextConfig) {
+          setConfig(nextConfig)
+        } else {
+          throw new Error("未返回有效的配置信息")
+        }
       }
     } catch (error) {
       console.error("Failed to load config:", error)
       toast({
         title: "错误",
-        description: "无法加载配置信息",
+        description: error instanceof Error ? error.message : "无法加载配置信息",
         variant: "destructive",
       })
     } finally {

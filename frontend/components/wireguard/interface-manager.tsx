@@ -72,15 +72,23 @@ export function InterfaceManager({ interfaces: propInterfaces, onInterfacesChang
       }
 
       const response = await interfaceApi.getAll()
-      console.log
 
       if (response.success) {
-        setInterfaces(response.data)
+        const rows = Array.isArray(response.data) ? response.data : []
+        const normalized = rows.map((item) => ({
+          id: Number(item.id),
+          name: item.name || `wg-${item.id}`,
+          status: typeof item.status === "string" ? item.status : "inactive",
+          listen_port: Number(item.listen_port ?? 0),
+          address: item.address || "",
+          peers: Array.isArray(item.peers) ? item.peers : [],
+        }))
+        setInterfaces(normalized)
         if (onInterfacesChange) {
           onInterfacesChange()
         }
       } else {
-        throw new Error(response.error || "获取接口列表失败")
+        throw new Error(response.error || response.message || "获取接口列表失败")
       }
     } catch (error) {
       console.error("Failed to load interfaces:", error)
@@ -130,7 +138,7 @@ export function InterfaceManager({ interfaces: propInterfaces, onInterfacesChang
         resetForm()
         loadInterfaces()
       } else {
-        throw new Error(response.error || "创建接口失败")
+        throw new Error(response.error || response.message || "创建接口失败")
       }
     } catch (error) {
       toast({
@@ -166,7 +174,7 @@ export function InterfaceManager({ interfaces: propInterfaces, onInterfacesChang
         resetForm()
         loadInterfaces()
       } else {
-        throw new Error(response.data.error || "更新接口失败")
+        throw new Error(response.error || response.message || "更新接口失败")
       }
     } catch (error) {
       toast({
@@ -190,7 +198,7 @@ export function InterfaceManager({ interfaces: propInterfaces, onInterfacesChang
         })
         loadInterfaces()
       } else {
-        throw new Error(response.error || "启动接口失败")
+        throw new Error(response.error || response.message || "启动接口失败")
       }
     } catch (error) {
       toast({
@@ -212,7 +220,7 @@ export function InterfaceManager({ interfaces: propInterfaces, onInterfacesChang
         })
         loadInterfaces()
       } else {
-        throw new Error(response.error || "停止接口失败")
+        throw new Error(response.error || response.message || "停止接口失败")
       }
     } catch (error) {
       toast({
@@ -234,7 +242,7 @@ export function InterfaceManager({ interfaces: propInterfaces, onInterfacesChang
         })
         loadInterfaces()
       } else {
-        throw new Error(response.data.error || "删除接口失败")
+        throw new Error(response.error || response.message || "删除接口失败")
       }
     } catch (error) {
       toast({
@@ -247,27 +255,26 @@ export function InterfaceManager({ interfaces: propInterfaces, onInterfacesChang
 
   const handleDownloadConfig = async (id: number, name: string) => {
     try {
-      const response = await interfaceApi.getConfig(id.toString())
+      const configText = await interfaceApi.getConfig(id)
 
-      if (response.status === 200) {
-        const config = response.data
-        const blob = new Blob([config], { type: "text/plain" })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement("a")
-        a.href = url
-        a.download = `${name}.conf`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
-
-        toast({
-          title: "成功",
-          description: "配置文件下载成功",
-        })
-      } else {
+      if (!configText) {
         throw new Error("下载配置文件失败")
       }
+
+      const blob = new Blob([configText], { type: "text/plain" })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = `${name}.conf`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+
+      toast({
+        title: "成功",
+        description: "配置文件下载成功",
+      })
     } catch (error) {
       toast({
         title: "错误",

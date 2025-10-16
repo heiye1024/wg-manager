@@ -27,8 +27,17 @@ export default function WireGuardPage() {
     try {
       setInterfacesLoading(true)
       const response = await interfaceApi.getAll()
-      if (response.data.success) {
-        setInterfaces(response.data.data)
+      if (response.success) {
+        const rows = Array.isArray(response.data) ? response.data : []
+        const mapped = rows.map<WireGuardInterface>((item) => ({
+          id: String(item.id),
+          name: item.name || `wg-${item.id}`,
+          status: item.status === "active" || item.status === "running" ? "active" : "inactive",
+          listen_port: Number(item.listen_port ?? 0),
+          address: item.address || "",
+          peers: Array.isArray(item.peers) ? item.peers : [],
+        }))
+        setInterfaces(mapped)
       }
     } catch (error) {
       console.error("Failed to load interfaces:", error)
